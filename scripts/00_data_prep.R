@@ -7,7 +7,7 @@ if(!data_exists){
   options(timeout = 1e6)
   
   #download from Zenodo
-  download.file("https://zenodo.org/records/21129432/files/input.tar.gz?download=1", 
+  download.file("https://zenodo.org/records/21133339/files/input.tar.gz?download=1", 
                 destfile = "input.tar.gz",
                 mode = "wb",
                 method = "libcurl")

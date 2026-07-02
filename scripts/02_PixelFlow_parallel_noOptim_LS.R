@@ -5,6 +5,8 @@
 #################################
 rm(list = ls())
 
+nodes <- 10
+
 suppressMessages({
   library(tidyr)
   library(dplyr)
@@ -32,7 +34,9 @@ data_dir    <- "input"
 
 ### LogFile
 #read alaska sites
-ala_sites <- readLines(glue::glue("{metadata_path}/ala_sites.txt"))
+ala_sites <- readLines("input/data/psa_metadata/ala_sites.txt") %>%  
+  tail(-1) %>% 
+  as.numeric()
 {
   #get directory names from rda files
   rda_files    <- tibble(Name = list.files(rda_dir)) %>% 
@@ -50,7 +54,7 @@ ala_sites <- readLines(glue::glue("{metadata_path}/ala_sites.txt"))
 site_pixel_flow <- function(run) {
   ID      <- rda_files$ID[run]
   name    <- rda_files$Name[run]
-  dir_out <- glue::glue("{project_dir}{name}")
+  dir_out <- glue::glue("{project_dir}/{name}")
   
   ### Create folder and copy files
   {
@@ -70,20 +74,20 @@ site_pixel_flow <- function(run) {
       recursive = TRUE
     )
     
-    invisible(
-      lapply(
-        c("map_init.png", "map_init_withHuman", "Map.png", "rda_summary.png"),
-        function(x) {
-          if (any(grepl(x, fls, fixed = TRUE))) {
-            file.copy(
-              glue::glue("{rda_dir}/{rda_files$Name[run]}/{fls[which(grepl(x, fls, fixed = TRUE))]}"),
-              glue::glue("{project_dir}/{rda_files$Name[run]}/{fls[which(grepl(x, fls, fixed = TRUE))]}"),
-              overwrite = TRUE
-            )
-          }
-        }
-      )
-    )
+    # invisible(
+    #   lapply(
+    #     c("map_init.png", "map_init_withHuman", "Map.png", "rda_summary.png"),
+    #     function(x) {
+    #       if (any(grepl(x, fls, fixed = TRUE))) {
+    #         file.copy(
+    #           glue::glue("{rda_dir}/{rda_files$Name[run]}/{fls[which(grepl(x, fls, fixed = TRUE))]}"),
+    #           glue::glue("{project_dir}/{rda_files$Name[run]}/{fls[which(grepl(x, fls, fixed = TRUE))]}"),
+    #           overwrite = TRUE
+    #         )
+    #       }
+    #     }
+    #   )
+    # )
   }
   
   runOut <- suppressWarnings(

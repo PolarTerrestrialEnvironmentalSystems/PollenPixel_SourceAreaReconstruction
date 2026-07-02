@@ -32,7 +32,9 @@ psa_metadata  <- read_csv(glue::glue("{metadata_path}/PSA_locations_northern_hem
 
 
 #psa_selection  <- psa_metadata$Dataset_ID[1:5]
-psa_selection <- readLines(glue::glue("{metadata_path}/ala_sites.txt")) 
+psa_selection <- readLines(glue::glue("{metadata_path}/ala_sites.txt")) |> 
+  tail(-1) |> 
+  as.numeric()
 
 errorTab <- tibble(ID = 1:length(psa_selection), 
                    SA = psa_selection, 
@@ -370,7 +372,7 @@ for(pp in psa_selection) {
         clim_dir       <- list.files(glue::glue("{data_dir}/data/global_maps"), pattern = "*.tif", full.names = T)
         
         clim_stars <- lapply(clim_variables$Var_Name, function(x) {
-          ind <- which(sapply(clim_dir, function(y) grepl(glue::glue("_{x}_"), y, fixed = T)))
+          ind <- which(sapply(clim_dir, function(y) {grepl(glue::glue("_{x}_"), y, fixed = T)}))
           read_stars(clim_dir[ind]) %>% 
             setNames(x) %>% 
             st_crop(psaVeg@regionMap %>% 
@@ -380,17 +382,18 @@ for(pp in psa_selection) {
             suppressMessages()
         })
         
-        elev_stars <- read_stars(clim_dir[grepl("ETOPO", clim_dir)][2]) %>% st_set_crs(4326)  %>%
+        elev_stars <- read_stars(clim_dir[grepl("ETOPO", clim_dir)]) %>% st_set_crs(4326)  %>%
           st_warp(., clim_stars[[1]], use_gdal = F, method = "near") %>%
           setNames("elev") %>% st_crop(psaVeg@regionMap %>% st_buffer(500) %>% st_transform(4326)) %>% suppressMessages() %>% suppressWarnings()
         
         ### Environment for selected crds
         psaEnv_init <-  lapply(clim_variables$Var_Name, function(x)
-                          read_stars(clim_dir[which(sapply(clim_dir, function(y) grepl(glue::glue("_{x}_"), y, fixed = T)))][2]) %>% 
+                          {
+                          read_stars(clim_dir[which(sapply(clim_dir, function(y) grepl(glue::glue("_{x}_"), y, fixed = T)))]) %>% 
                             setNames(x) %>% suppressMessages() %>% st_extract(psaCrds) %>% 
-                            pull(1) %>% unlist()) %>% Reduce("cbind", .) %>% as_tibble() %>% setNames(clim_variables$Var_Name) %>% 
+                            pull(1) %>% unlist()}) %>% Reduce("cbind", .) %>% as_tibble() %>% setNames(clim_variables$Var_Name) %>% 
                           mutate(elev = st_extract(
-                            read_stars(clim_dir[grepl("ETOPO", clim_dir)][2]) %>% st_set_crs(4326) %>% setNames("elev"),
+                            read_stars(clim_dir[grepl("ETOPO", clim_dir)]) %>% st_set_crs(4326) %>% setNames("elev"),
                             psaCrds) %>% pull(1))
         
         ### Environment for selected crds and complete psa
@@ -466,9 +469,6 @@ for(pp in psa_selection) {
             )) %>% dplyr::select("RDA1", "RDA2")
         
         psaOvlp <- make_psaOvlp(rdaOut, range_axes = apply(zTransEnvRDA, 2, range))
-        
-        # plot(psaOvlp@centers)
-        # plot(psaOvlp@densities)
         
         save(psaOvlp, file = glue::glue("{dir_out}/psaOvlp/psaOvlp.rda"))
       }

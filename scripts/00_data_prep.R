@@ -29,6 +29,7 @@ if(length(clim_files) != 22){
   file_links <- readLines("input/data/global_maps/clim_data.txt")
   for(file in file_links){
     file_name <- unlist(strsplit(file, "/"))[10]
+    if(file.exists(file.path("input/data/global_maps",file_name))) next
     options(timeout = 1e6)
     download.file(file,
                   destfile = file.path("input/data/global_maps",
@@ -50,7 +51,7 @@ if(!topo_there){
   #unzip
   unzip("input/data/global_maps/ETOPO1_Ice_g_geotiff.zip",
         "ETOPO1_Ice_g_geotiff.tif",
-        exdir = "data/global_maps")
+        exdir = "input/data/global_maps")
   
   #delete zipped version
   unlink("input/data/global_maps/ETOPO1_Ice_g_geotiff.zip",

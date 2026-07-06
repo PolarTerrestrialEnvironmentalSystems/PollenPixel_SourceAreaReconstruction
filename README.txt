@@ -1,9 +1,7 @@
-describe how the input set up works (automatically)
+This repository contains code to conduct the first two steps of the PollenPixel workflow (pollen to land cover and land cover to source area).
 
-scripts use gee package which is an API to GEE, you therefore need a GEE login and an active project to run this
-this is free to set up for any noncommercial user
-list some tips for initialization and authentification here (either link or write out) especially the tips that Julia listed in her documentation (always worked on linux for me)
+The pipeline can be executed by just downloading the repository and running the script main.R. Input data and packages will be downloaded and installed automatically. 
 
-other necessary packages etc could be automatically installed in the set up script as well
+Please note that you can adjust the number of nodes to use for parallelization in the file scripts/02_PixelFlow_parallel_noOptim_LS.R. The variable is called nodes and located in line 8.
 
-describe what the working directory should look like
+Results will be stored in a newly created directory "landcoverchange".

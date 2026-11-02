@@ -1760,7 +1760,8 @@ createFolders = function(folder_path, silent = TRUE, indent = 1) {
              "summaryResults" = list())
 
 
-    invisible(lapply(names(x), function(f) dir.create(glue::glue("{folder_path}/{f}"))))
+    invisible(lapply(names(x), 
+                     function(f) dir.create(glue::glue("{folder_path}{f}"))))
 
 }
 

@@ -36,6 +36,8 @@ psa_selection <- readLines(glue::glue("{metadata_path}/ala_sites.txt")) |>
   tail(-1) |> 
   as.numeric()
 
+psa_selection <- psa_selection[1:2]
+
 errorTab <- tibble(ID = 1:length(psa_selection), 
                    SA = psa_selection, 
                    time = NA, 

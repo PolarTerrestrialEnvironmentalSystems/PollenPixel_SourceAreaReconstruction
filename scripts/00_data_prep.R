@@ -64,7 +64,6 @@ check_and_load <- function(package_name){
   is_there <- require(package_name,
                       character.only = TRUE)
   if(!is_there){
-    print("installing ",package_name)
     install.packages(package_name)
     require(package_name,
             character.only = TRUE)

@@ -3,10 +3,10 @@ rm(list = ls())
 
 setwd(getSrcDirectory(function(){})[1])
 
-# set the amount of cores you want to use for parallel computing
-NODES <- 5
-
 source("scripts/00_data_prep.R")
+
+# Set workers after data preparation, which clears the global environment.
+NODES <- 5
 
 source("scripts/01_Preprocessing_LS.R")
 

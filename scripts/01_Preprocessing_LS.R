@@ -79,8 +79,9 @@ for(pp in psa_selection) {
 
     dir_out <- glue::glue("{project_dir}/PSA_{current_psa$Dataset_ID}__{psa_long}_{psa_lat}/")
     if(!file.exists(dir_out)) {
-      dir.create(dir_out)
-      createFolders(dir_out)
+      dir.create(dir_out, recursive = TRUE)
+      createFolders(dir_out,
+                    recursive = TRUE)
       fs::dir_tree(path = dir_out, recurse = TRUE)
     }
   }

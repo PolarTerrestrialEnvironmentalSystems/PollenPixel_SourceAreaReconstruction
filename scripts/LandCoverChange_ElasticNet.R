@@ -42,6 +42,27 @@ setMethod("plot", "psaVeg", function(x) {
 })
 
 
+# NODES (set in main.R) controls the PSOCK apply calls below.
+.psock_lapply <- function(X, FUN, ..., packages = character()) {
+  if (!is.numeric(NODES) || length(NODES) != 1L || is.na(NODES) ||
+      !is.finite(NODES) || NODES < 1 || NODES != floor(NODES)) {
+    stop("NODES must be a positive whole number.")
+  }
+  if (length(X) == 0L) return(list())
+
+  cl <- parallel::makePSOCKcluster(as.integer(min(length(X), NODES)))
+  on.exit(parallel::stopCluster(cl), add = TRUE)
+
+  parallel::clusterCall(cl, function(packages) {
+    for (pkg in packages) library(pkg, character.only = TRUE)
+    NULL
+  }, packages)
+
+  # Workers receive dependencies as arguments, without serializing caller frames.
+  environment(FUN) <- .GlobalEnv
+  parallel::parLapply(cl, X, FUN, ...)
+}
+
 make_psaVeg <- function(ID, psa, radius, buffer, resolution, PSAmax, proj = "laea",
                         veg_folder, 
                         interpolate = TRUE, 
@@ -61,9 +82,12 @@ make_psaVeg <- function(ID, psa, radius, buffer, resolution, PSAmax, proj = "lae
   # read vegetation cover and meta data
   file_names <- list.files(veg_folder)
   
-  veg_cover <- parallel::mclapply(file_names, function(x) {
-    data.table::fread(file.path(veg_folder, x), verbose = !silent, showProgress = !silent) %>%
-      mutate(dataset = x)}, mc.cores = min(c(length(file_names), nrCores)))
+  # nrCores is retained for caller compatibility; NODES controls workers.
+  veg_cover <- .psock_lapply(file_names, function(x, veg_folder, silent) {
+    dat <- data.table::fread(file.path(veg_folder, x), verbose = !silent,
+                            showProgress = !silent, nThread = 1L)
+    dplyr::mutate(dat, dataset = x)
+  }, veg_folder = veg_folder, silent = silent)
   names(veg_cover) <- file_names
   
   # extract meta data
@@ -168,8 +192,9 @@ interpVegTS = function(veg_cover,
   if(!silent) cat("\n\nInterpolate past vegetation time series")
 
     suppressMessages({
-      (parallel::mclapply(unique(veg_cover$Dataset_ID),
-                          function(x){
+      # nrCores is retained for caller compatibility; NODES controls workers.
+      (.psock_lapply(unique(veg_cover$Dataset_ID),
+                          function(x, veg_cover, fc, dt, k, interpolate_fun){
                             
                             veg_site = veg_cover %>% 
                               filter(Dataset_ID == x) %>% 
@@ -178,7 +203,7 @@ interpVegTS = function(veg_cover,
                             veg_site %>% 
                               mutate(Interp = FALSE) %>% 
                               relocate(Interp, .after = Age) %>%
-                              bind_rows((suppressWarnings({interpolate_ages_per_site(df = veg_site, 
+                              bind_rows((suppressWarnings({interpolate_fun(df = veg_site,
                                                                                      meta_cols = c("Dataset_ID", "Age"),
                                                                                      fc = fc, 
                                                                                      dt = dt, 
@@ -187,7 +212,9 @@ interpVegTS = function(veg_cover,
                                            relocate(Interp, .after = Age))) %>% 
                               arrange(Age, Interp)
                             
-                          }, mc.cores = ifelse(is.null(nrCores), 1, nrCores))) %>% Reduce("full_join", .)
+                          }, veg_cover = veg_cover, fc = fc, dt = dt, k = k,
+                          interpolate_fun = interpolate_ages_per_site,
+                          packages = c("dplyr", "zoo", "corit"))) %>% Reduce("full_join", .)
       })
 }
 
@@ -1698,7 +1725,7 @@ mergeMaps <- function(psaLCover, initRast, psaChangeTab, path = glue::glue("{dir
   ages <- ages[-which(ages <= 500)]
   ages[1] <- "Init"
   
-  mergeRast <- parallel::mclapply(ages, function(y) {
+  mergeRast <- .psock_lapply(ages, function(y, psaChangeTab, path, emptyRast, w) {
     
     selects <- lapply(psaChangeTab$Path, function(p) {
       load(glue::glue("{path}/{p}"))
@@ -1718,7 +1745,8 @@ mergeMaps <- function(psaLCover, initRast, psaChangeTab, path = glue::glue("{dir
     outRast <- emptyRast; outRast[[1]][] <- selects
     outRast[1] %>% setNames(glue::glue("year_{y}"))
     
-  }, mc.cores = min(length(ages), parallel::detectCores()-25)) %>% Reduce("c",.) %>% merge() %>% setNames("LandcoverChange")
+  }, psaChangeTab = psaChangeTab, path = path, emptyRast = emptyRast, w = w,
+  packages = c("dplyr", "stars")) %>% Reduce("c",.) %>% merge() %>% setNames("LandcoverChange")
   
   mergeRast
 }

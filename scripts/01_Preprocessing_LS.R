@@ -80,8 +80,7 @@ for(pp in psa_selection) {
     dir_out <- glue::glue("{project_dir}/PSA_{current_psa$Dataset_ID}__{psa_long}_{psa_lat}/")
     if(!file.exists(dir_out)) {
       dir.create(dir_out, recursive = TRUE)
-      createFolders(dir_out,
-                    recursive = TRUE)
+      createFolders(dir_out)
       fs::dir_tree(path = dir_out, recurse = TRUE)
     }
   }
@@ -122,16 +121,17 @@ for(pp in psa_selection) {
   #### 1.3 Create vegetation object for PSA
   {
     # load data, filter pollen source areas in region and/or calibration subset
-    if(!file.exists(glue::glue("{dir_out}/summaryResults/psaVeg.rda")) & check_files) {
+    if(!file.exists(glue::glue("{dir_out}summaryResults/psaVeg.rda")) & check_files) {
       psaVeg <- make_psaVeg(ID, psa, radius, calibration_buffer, resolution, PSAmax, proj = "laea",
                             veg_folder = file.path(data_dir, "data", "vegetation_cover"), 
                             fc = 1/500, dt = 500, k = 5, nrCores = 9)
-      save(psaVeg, file = glue::glue("{dir_out}/summaryResults/psaVeg.rda"))
+      save(psaVeg, 
+           file = glue::glue("{dir_out}summaryResults/psaVeg.rda"))
       
       plot(psaVeg)
-      ggsave(glue::glue("{dir_out}/summaryResults/Map.png"), width = 10, height = 10, units = "cm")
+      ggsave(glue::glue("{dir_out}summaryResults/Map.png"), width = 10, height = 10, units = "cm")
       
-    } else load(glue::glue("{dir_out}/summaryResults/psaVeg.rda"))
+    } else load(glue::glue("{dir_out}summaryResults/psaVeg.rda"))
     
   }
   
@@ -142,7 +142,7 @@ for(pp in psa_selection) {
   
   #### 2.1 Modern LandCover share
   {
-    if(!file.exists(glue::glue("{dir_out}/psaEnv/modernVegetation.rda"))) {
+    if(!file.exists(glue::glue("{dir_out}psaEnv/modernVegetation.rda"))) {
       ### modern time threshold for calibration
       modern_age_threshold <- 1000 
       
@@ -159,9 +159,12 @@ for(pp in psa_selection) {
   
   #### 2.2 CCI LandCover map of PSA
   {
-    roi_sf  <- psaVeg@regionMap %>% st_transform(4326)
-    roi     <- roi_sf %>% st_shift_longitude() %>% sf_as_ee()
-    dataset <- ee$Image(glue::glue("users/slisovski/LandCoverChange/LandCover_CCI_{resolution}"))
+    roi_sf  <- psaVeg@regionMap %>% 
+      st_transform(4326)
+    roi     <- roi_sf %>% 
+      st_shift_longitude() %>% 
+      sf_as_ee()
+    #dataset <- ee$Image(glue::glue("users/slisovski/LandCoverChange/LandCover_CCI_{resolution}"))
     
     if(!file.exists(glue::glue("{dir_out}/summaryResults/dataset_rast.tiff")) & check_files) {
       if(diff(range(st_coordinates(roi_sf)[,1]))<100) {
@@ -497,8 +500,8 @@ for(pp in psa_selection) {
    load(glue::glue("{dir_out}/psaEnv/env_stars.rda"))
    
    ## LandCover Init Map 
-   if(!file.exists(glue::glue("{dir_out}/summaryResults/map_init.png"))  & check_files) {
-      dataset_rast <- read_stars(glue::glue("{dir_out}/summaryResults/dataset_rast.tiff"))
+   if(!file.exists(glue::glue("{dir_out}summaryResults/map_init.png"))  & check_files) {
+      dataset_rast <- read_stars(glue::glue("{dir_out}summaryResults/dataset_rast.tiff"))
         
       mergeTab    <- class_defs %>% 
         mutate(lcov = ifelse(is.na(Merge_To_Class), Class_Code, Merge_To_Class)) %>%
@@ -531,7 +534,7 @@ for(pp in psa_selection) {
             xlab("") + ylab("") +
             theme_light()
           
-          ggsave(plot = pl_human, file = glue::glue("{dir_out}/summaryResults/map_init_withHuman.png"), width = 20, height = 12, units = "cm")
+          ggsave(plot = pl_human, file = glue::glue("{dir_out}summaryResults/map_init_withHuman.png"), width = 20, height = 12, units = "cm")
           
           transPxl <- initRast[1] %>% 
             st_as_sf(na.rm = FALSE) %>% 
@@ -604,8 +607,8 @@ for(pp in psa_selection) {
         xlab("") + ylab("") +
         theme_light()
       
-      save(initRast, file = glue::glue("{dir_out}/summaryResults/initRast.rda"))
-      ggsave(glue::glue("{dir_out}/summaryResults/map_init.png"), 
+      save(initRast, file = glue::glue("{dir_out}summaryResults/initRast.rda"))
+      ggsave(glue::glue("{dir_out}summaryResults/map_init.png"), 
              width = 20, 
              height = 12, 
              units = "cm")

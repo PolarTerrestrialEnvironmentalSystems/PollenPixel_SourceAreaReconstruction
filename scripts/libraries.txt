@@ -20,3 +20,10 @@ openxlsx
 abind
 lpSolve
 zoo
+devtools
+remotes
+rnaturalearth
+rnaturalearthdata
+geojsonio
+lwgeom
+keras

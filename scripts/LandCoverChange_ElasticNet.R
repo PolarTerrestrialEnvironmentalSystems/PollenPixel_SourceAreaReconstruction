@@ -42,15 +42,25 @@ setMethod("plot", "psaVeg", function(x) {
 })
 
 
-# NODES (set in main.R) controls the PSOCK apply calls below.
-.psock_lapply <- function(X, FUN, ..., packages = character()) {
-  if (!is.numeric(NODES) || length(NODES) != 1L || is.na(NODES) ||
-      !is.finite(NODES) || NODES < 1 || NODES != floor(NODES)) {
-    stop("NODES must be a positive whole number.")
+# NODES (set in main.R) is the single worker limit for every pipeline stage.
+.worker_count <- function(tasks = Inf) {
+  if (!exists("NODES", inherits = TRUE) || !is.numeric(NODES) ||
+      length(NODES) != 1L || is.na(NODES) || !is.finite(NODES) ||
+      NODES < 1 || NODES != floor(NODES) || NODES > .Machine$integer.max) {
+    stop("NODES must be a positive whole number; set it in main.R or before sourcing a stage.")
   }
+  as.integer(min(tasks, NODES))
+}
+
+.make_worker_cluster <- function(tasks = Inf) {
+  parallel::makePSOCKcluster(.worker_count(tasks))
+}
+
+.psock_lapply <- function(X, FUN, ..., packages = character()) {
+  .worker_count()
   if (length(X) == 0L) return(list())
 
-  cl <- parallel::makePSOCKcluster(as.integer(min(length(X), NODES)))
+  cl <- .make_worker_cluster(length(X))
   on.exit(parallel::stopCluster(cl), add = TRUE)
 
   parallel::clusterCall(cl, function(packages) {
@@ -476,7 +486,7 @@ regressionModel <- function(psaVeg,
                             pseudocount = 1e-6,
                             alpha_grid = seq(0, 1, by = 0.25),
                             seed_int = 1234,
-                            n_workers = 10,
+                            n_workers = NULL,
                             inner_nfolds = 3) {
   
   `%>%` <- dplyr::`%>%`
@@ -608,12 +618,13 @@ regressionModel <- function(psaVeg,
   # --------------------------------------------------
   # Parallel backend
   # --------------------------------------------------
-  n_workers <- min(n_workers, parallel::detectCores(logical = TRUE))
-  cl <- parallel::makeCluster(n_workers)
-  doParallel::registerDoParallel(cl)
+  # n_workers is retained for caller compatibility; NODES controls workers.
+  cl <- .make_worker_cluster()
   on.exit({
+    foreach::registerDoSEQ()
     try(parallel::stopCluster(cl), silent = TRUE)
   }, add = TRUE)
+  doParallel::registerDoParallel(cl)
   
   # --------------------------------------------------
   # Fit per calibration map

@@ -2,7 +2,12 @@ This repository contains code to conduct the first two steps of the PollenPixel 
 
 The pipeline can be executed by just downloading the repository and running the script main.R. Input data and packages will be downloaded and installed automatically. 
 
-You can adjust parallelization with the nodes variable near the top of scripts/02_PixelFlow_parallel_noOptim_LS.R.
+Set NODES in main.R to control workers throughout preprocessing, regression
+fitting, and pixel flow. Task-based pools use fewer workers when there are fewer
+tasks. When sourcing an individual stage, set NODES first in the same R session.
+Legacy nrCores/n_workers function arguments are retained for compatibility;
+NODES controls the worker count. Regression fitting creates and closes its own
+pool and resets foreach to sequential execution when finished.
 
 Results will be stored in a newly created directory "landcoverchange".
 
@@ -67,6 +72,11 @@ preprocessing status, stage, and error message. Preprocessing failures stop the
 workflow before pixel flow starts. The project-level ice_flow_status.csv records
 completed, cached, or failed pixel-flow sites.
 Ice reaching a pollen source is logged; it does not currently adjust its targets.
+Source-point cell indices, source-polygon boundary fractions, and area weights
+are prepared once per site. Each age reuses them with the ice-status vector
+already loaded for allocation, avoiding repeated projection, cell-area
+calculations, and exact polygon extraction. Source-area overlap remains weighted
+by the same cell areas and boundary fractions.
 
 The current ElasticNet workflow does not require Keras or TensorFlow at startup.
 The optional legacy KLD metric checks for Keras only if that metric is requested.

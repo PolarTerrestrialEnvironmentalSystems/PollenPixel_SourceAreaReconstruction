@@ -5,7 +5,8 @@ setwd(getSrcDirectory(function(){})[1])
 
 source("scripts/00_data_prep.R")
 
-# Set workers after data preparation, which clears the global environment.
+# Worker limit for preprocessing, regression fitting, and pixel flow.
+# Set after data preparation, which clears the global environment.
 NODES <- 5
 
 source("scripts/01_Preprocessing_LS.R")

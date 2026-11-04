@@ -9,6 +9,7 @@
 #source functions scripts
 source("scripts/LandCoverChange_ElasticNet.R")
 source("scripts/ice_cover.R")
+invisible(.worker_count())
 
 #############
 ### Setup ###
@@ -135,7 +136,7 @@ for(pp in psa_selection) {
     if(!file.exists(glue::glue("{dir_out}summaryResults/psaVeg.rda")) & check_files) {
       psaVeg <- make_psaVeg(ID, psa, radius, calibration_buffer, resolution, PSAmax, proj = "laea",
                             veg_folder = file.path(data_dir, "data", "vegetation_cover"), 
-                            fc = 1/500, dt = 500, k = 5, nrCores = 9)
+                            fc = 1/500, dt = 500, k = 5)
       save(psaVeg, 
            file = glue::glue("{dir_out}summaryResults/psaVeg.rda"))
       
@@ -289,14 +290,11 @@ for(pp in psa_selection) {
     preprocessing_stage <- "vegetation_calibration"
     if(!file.exists(glue::glue("{dir_out}/summaryResults/veg_lc_model_new.rda")) & check_files) {
       Sys.unsetenv("LD_LIBRARY_PATH")
-      cl <- parallel::makeCluster(20)
-      doParallel::registerDoParallel(cl)
       veg_lc_model <- regressionModel(psaVeg, 
                                       lcovShares, 
                                       vegetation_modern_years = 1000, 
                                       prefilter_taxa = T) %>% 
         suppressWarnings()
-      stopCluster(cl)
       
       save(veg_lc_model, 
            file = glue::glue("{dir_out}/summaryResults/veg_lc_model_new.rda"))

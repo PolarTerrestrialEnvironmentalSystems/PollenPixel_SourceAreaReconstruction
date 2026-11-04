@@ -4,3 +4,7 @@
 !/tests/compare_landcover.py
 !/tests/test_compare_landcover.py
 !/tests/README.txt
+!/tests/compare_regression.py
+!/tests/export_regression_metrics.R
+!/tests/test_compare_regression.py
+!/tests/workers.R

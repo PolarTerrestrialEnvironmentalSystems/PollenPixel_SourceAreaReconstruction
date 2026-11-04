@@ -1,9 +1,7 @@
 #################################
 ### PollenPixel: pixel flow    ###
 #################################
-rm(list = ls())
-
-nodes <- 10
+rm(list = setdiff(ls(), "NODES"))
 
 suppressPackageStartupMessages({
   library(dplyr)
@@ -21,6 +19,7 @@ sf_use_s2(FALSE)
 
 source("scripts/LandCoverChange_ElasticNet.R")
 source("scripts/ice_cover.R")
+invisible(.worker_count())
 configure_spatial_runtime()
 
 project_dir <- "landcoverchange"
@@ -293,6 +292,9 @@ site_pixel_flow <- function(run) {
       source_point,
       source_point[["Pollen_Source_Radius [m]"]]
     )
+    source_geometry <- prepare_ice_source_geometry(
+      template, source_point, source_polygon
+    )
 
     classFlow <- matrix(initial_state, nrow = length(cell_ids), ncol = length(ice_ages))
     diagnostics <- vector("list", length(ice_ages))
@@ -329,9 +331,7 @@ site_pixel_flow <- function(run) {
         switches <- allocation$switches
       }
 
-      overlap <- ice_source_overlap(
-        mask_files[step], source_point, source_polygon
-      )
+      overlap <- ice_source_overlap(ice, source_geometry)
       eligible_count <- sum(eligible)
       counts <- tabulate(
         match(classFlow[eligible, step], class_ids),
@@ -457,7 +457,9 @@ site_pixel_flow <- function(run) {
 
 # Workers open the NetCDF and mask files themselves. Terra objects contain
 # external pointers and must not be exported from the parent R process.
-cl <- parallel::makeCluster(nodes)
+if (!nrow(rda_files)) stop("No sites available for pixel flow.")
+cl <- .make_worker_cluster(nrow(rda_files))
+results <- tryCatch({
 parallel::clusterEvalQ(cl, {
   suppressPackageStartupMessages({
     library(dplyr)
@@ -482,10 +484,8 @@ parallel::clusterExport(
     "ice_settings", "ice_source", "site_pixel_flow", "plot_landcover_flow"
   )
 )
-results <- tryCatch(
-  parallel::clusterApplyLB(cl, seq_len(nrow(rda_files)), site_pixel_flow),
-  finally = parallel::stopCluster(cl)
-)
+parallel::clusterApplyLB(cl, seq_len(nrow(rda_files)), site_pixel_flow)
+}, finally = parallel::stopCluster(cl))
 results <- bind_rows(results)
 write.csv(
   results,

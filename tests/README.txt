@@ -42,3 +42,50 @@ to avoid conflicts with inherited PostGIS settings, for this process only.
 
 Run synthetic integration checks:
   python -m unittest discover -s tests -p test_compare_landcover.py
+
+Regression performance comparison
+=================================
+Requires Python (standard library only) and R; no model refitting or extra R
+packages are needed to extract saved metrics. Rscript is detected on PATH or
+in the standard Windows R installation directory; override with --rscript.
+
+  python tests/compare_regression.py "D:/previous/landcoverchange"
+  python tests/compare_regression.py "D:/previous/site" --current "D:/current/site" --output tests/regression_v1_v2
+
+As with the pixel comparison, pass matching directory levels. Model files are
+matched by relative path; calibration maps by their saved names. The default
+pattern is **/veg_lc_model_new.rda; --pattern changes it for both inputs.
+
+Outputs (overwritten on rerun):
+  metrics.csv: overall and per-class cross-validation scores, current minus
+    previous delta, percent change, preferred direction and context checks.
+  saved_metrics.csv: extracted metrics and context from each version.
+  issues.csv: missing files and unsupported/unreadable model files.
+
+Modern metrics include MAE, RMSE, R2 and mean Aitchison distance where saved.
+MAE/RMSE are in proportions (0-1), not percentages. Lower errors/distances and
+higher R2 are better. Percent change uses abs(previous) as denominator; it is
+blank for a zero baseline. NA/infinite values remain unavailable, not zero.
+
+The comparison checks saved method, class set, sample/fold counts, pseudocount,
+calibration row identities/order and fold assignments. Missing or changed
+context prevents an improved/regressed assessment for changed scores. Matching
+context does not prove identical input values or training implementations.
+Review context_details, and review unmatched metrics/classes. Class additions
+affect overall averages and compositional distances even for unchanged classes.
+No significance testing or paired sample comparison is attempted. The reported
+scores are the workflow's saved cross-validation estimates, not an independent
+test set; model selection protocols may differ between versions.
+
+Legacy mean_MAE/MAE metrics retain legacy_ prefixes and their stored units.
+They are not equated with modern composition metrics. Unsupported legacy
+formats appear in issues.csv; missing metrics appear in metrics.csv. Available
+metrics are still reported when other files fail. Exit 2 means file issues or
+no numeric metric pairs; exit 0 means the comparison completed (inspect the
+status/context columns for unavailable or unmatched metrics).
+
+Run regression comparison checks:
+  python -m unittest discover -s tests -p test_compare_regression.py
+
+Worker configuration checks (no production data modified):
+  Rscript tests/workers.R

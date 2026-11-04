@@ -380,23 +380,50 @@ ice_output_values <- function(base_values, cell_ids, vegetation, ice,
   base_values
 }
 
-ice_source_overlap <- function(mask_file, source_point, source_polygon) {
-  mask <- terra::rast(mask_file)
-  point <- terra::project(terra::vect(source_point), terra::crs(mask))
-  polygon <- terra::project(terra::vect(source_polygon), terra::crs(mask))
-  point_ice <- terra::extract(mask, point, ID = FALSE)[1, 1]
+prepare_ice_source_geometry <- function(template, source_point, source_polygon) {
+  point <- terra::project(terra::vect(source_point), terra::crs(template))
+  polygon <- terra::project(terra::vect(source_polygon), terra::crs(template))
+  point_cell <- terra::cellFromXY(template, terra::crds(point))
+  if (length(point_cell) != 1 || anyNA(point_cell)) {
+    stop("Expected one pollen source point inside the reconstruction grid.")
+  }
 
-  # Weight the actual source polygon by cell area and boundary-cell fraction.
-  cell_area <- terra::cellSize(mask, unit = "m")
+  # Areas and exact boundary fractions depend on the grid and source polygon,
+  # not on age. Compute them once, including cells with missing land-cover data.
+  cell_area <- terra::cellSize(template, unit = "m", mask = FALSE)
   names(cell_area) <- "area"
-  extracted <- terra::extract(c(mask, cell_area), polygon, exact = TRUE)
-  if (anyNA(extracted$ice) || is.na(point_ice)) {
+  extracted <- terra::extract(cell_area, polygon, cells = TRUE, exact = TRUE)
+  weights <- extracted$area * extracted$fraction
+  total_weight <- sum(weights)
+  if (!nrow(extracted) || anyNA(extracted$cell) ||
+      any(!is.finite(weights)) || any(weights < 0) ||
+      !is.finite(total_weight) || total_weight <= 0) {
+    stop("Cannot calculate pollen source-area weights on this grid.")
+  }
+
+  list(
+    cell_count = terra::ncell(template),
+    point_cell = point_cell,
+    polygon_cells = extracted$cell,
+    weights = weights,
+    total_weight = total_weight
+  )
+}
+
+ice_source_overlap <- function(ice, source_geometry) {
+  if (!is.logical(ice) || length(ice) != source_geometry$cell_count) {
+    stop("Ice status must match the grid used for pollen source geometry.")
+  }
+  point_ice <- ice[source_geometry$point_cell]
+  polygon_ice <- ice[source_geometry$polygon_cells]
+  if (anyNA(polygon_ice) || is.na(point_ice)) {
     stop("Unknown ice status at the pollen source point or source polygon.")
   }
-  weights <- extracted$area * extracted$fraction
+
   list(
-    source_point_ice = point_ice == 1,
-    source_area_ice_fraction = sum(extracted$ice * weights) / sum(weights)
+    source_point_ice = point_ice,
+    source_area_ice_fraction =
+      sum(polygon_ice * source_geometry$weights) / source_geometry$total_weight
   )
 }
 

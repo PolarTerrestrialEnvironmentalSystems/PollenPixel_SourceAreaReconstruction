@@ -89,3 +89,6 @@ Run regression comparison checks:
 
 Worker configuration checks (no production data modified):
   Rscript tests/workers.R
+
+Ice-layer naming and download-restart checks (synthetic, no downloads):
+  Rscript tests/ice_layers.R

@@ -19,6 +19,10 @@ download. The shared configuration and ice helpers are in scripts/ice_cover.R.
 
 The ICEM layer for an age in years is ICEM_((26100 - age) / 100). The modern
 initialization uses age 0 (ICEM_261); its existing output label remains -1000.
+Both ICEM_1..ICEM_261 names and GDAL's ICEM_T122KP11 coordinate names are
+supported. Coordinate names must describe the complete ordered -26..0 axis;
+the reconstruction still uses the ordinal age mapping above. A valid existing
+.part download is checked and reused on restart instead of downloaded again.
 Each requested layer must exist exactly. The pipeline rotates the source's
 0-360 degree longitude grid, classifies values greater than zero as ice, and
 aligns categorical masks to each site's grid using terra and nearest neighbors.

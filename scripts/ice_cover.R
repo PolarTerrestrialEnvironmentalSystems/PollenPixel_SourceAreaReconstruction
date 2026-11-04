@@ -70,6 +70,10 @@ ice_layer_lookup <- function(filename, ages, settings = ice_cover_settings()) {
   # The file contains three subdatasets. Select ICEM explicitly; the GDAL time
   # coordinate is not the chronology supplied for this simulation.
   ice <- terra::rast(filename, subds = "ICEM")
+  ice_layer_lookup_names(names(ice), ages, settings)
+}
+
+ice_layer_lookup_names <- function(layer_names, ages, settings = ice_cover_settings()) {
   source_index <- (settings$age_origin - ages) / settings$age_interval
 
   if (any(!is.finite(source_index)) ||
@@ -78,9 +82,24 @@ ice_layer_lookup <- function(filename, ages, settings = ice_cover_settings()) {
   }
 
   layer_name <- paste0("ICEM_", as.integer(round(source_index)))
-  layer_number <- match(layer_name, names(ice))
+  if (all(grepl("^ICEM_[0-9]+$", layer_names))) {
+    layer_number <- match(layer_name, layer_names)
+  } else {
+    # Some terra/GDAL versions expose the NetCDF coordinate in band names.
+    # Validate this source's entire known axis before assigning ordinal IDs;
+    # do not interpret these coordinates as reconstruction ages or guess bands.
+    coordinates <- suppressWarnings(as.numeric(sub("^ICEM_T122KP11=", "", layer_names)))
+    if (length(layer_names) != 261L ||
+        !all(grepl("^ICEM_T122KP11=", layer_names)) ||
+        any(!is.finite(coordinates)) ||
+        any(abs(coordinates - seq(-26, 0, by = 0.1)) > 1e-8)) {
+      stop("Unrecognized ICEM layer names or coordinate axis; expected ICEM_1..ICEM_261 ",
+           "or 261 ICEM_T122KP11 coordinates ordered from -26 to 0.")
+    }
+    layer_number <- match(as.integer(round(source_index)), seq_along(layer_names))
+  }
 
-  if (anyNA(layer_number) || anyDuplicated(names(ice))) {
+  if (anyNA(layer_number) || anyDuplicated(layer_names)) {
     stop(
       "Missing or ambiguous ice layers: ",
       paste(layer_name[is.na(layer_number)], collapse = ", ")
@@ -95,29 +114,41 @@ ice_layer_lookup <- function(filename, ages, settings = ice_cover_settings()) {
   )
 }
 
+validate_ice_cover_file <- function(filename, settings) {
+  lookup <- ice_layer_lookup(filename, c(0, 26000), settings)
+  for (layer in lookup$layer_number) {
+    raster <- terra::rast(filename, subds = "ICEM", lyrs = layer)
+    values <- terra::values(raster, mat = FALSE)
+    if (!length(values) || all(is.na(values))) {
+      stop("Ice input contains an unreadable endpoint layer: ", filename)
+    }
+  }
+  invisible(TRUE)
+}
+
 prepare_ice_cover <- function(settings = ice_cover_settings()) {
   dir.create(dirname(settings$file), recursive = TRUE, showWarnings = FALSE)
 
   if (!file.exists(settings$file)) {
     partial_file <- paste0(settings$file, ".part")
-    options(timeout = max(1e6, getOption("timeout")))
-    download_status <- download.file(
-      settings$url,
-      destfile = partial_file,
-      method = "libcurl",
-      mode = "wb"
-    )
-    if (download_status != 0) stop("Ice download did not complete successfully.")
+    # Reuse a completed download that an earlier layer-name check rejected.
+    reusable <- file.exists(partial_file) && isTRUE(tryCatch(
+      validate_ice_cover_file(partial_file, settings), error = function(error) FALSE
+    ))
+    if (!reusable) {
+      options(timeout = max(1e6, getOption("timeout")))
+      download_status <- download.file(
+        settings$url,
+        destfile = partial_file,
+        method = "libcurl",
+        mode = "wb"
+      )
+      if (download_status != 0) stop("Ice download did not complete successfully.")
 
-    # Force reads at both ends so an HTML response or truncated NetCDF fails
-    # before it becomes the reusable input file.
-    lookup <- ice_layer_lookup(partial_file, c(0, 26000), settings)
-    for (layer in lookup$layer_number) {
-      raster <- terra::rast(partial_file, subds = "ICEM", lyrs = layer)
-      values <- terra::values(raster, mat = FALSE)
-      if (!length(values) || all(is.na(values))) {
-        stop("Downloaded ice layer contains no readable values.")
-      }
+      # Force endpoint reads before accepting an HTML response/truncated file.
+      validate_ice_cover_file(partial_file, settings)
+    } else {
+      message("Reusing validated ice download: ", partial_file)
     }
 
     if (!file.rename(partial_file, settings$file)) {
@@ -132,16 +163,7 @@ prepare_ice_cover <- function(settings = ice_cover_settings()) {
   manifest <- if (file.exists(manifest_file)) readRDS(manifest_file) else NULL
 
   if (is.null(manifest) || !identical(manifest$identity, identity)) {
-    endpoints <- ice_layer_lookup(settings$file, c(0, 26000), settings)
-    for (layer in endpoints$layer_number) {
-      values <- terra::values(
-        terra::rast(settings$file, subds = "ICEM", lyrs = layer),
-        mat = FALSE
-      )
-      if (!length(values) || all(is.na(values))) {
-        stop("Ice input contains an unreadable layer; replace ", settings$file)
-      }
-    }
+    validate_ice_cover_file(settings$file, settings)
     manifest <- list(
       identity = identity,
       checksum = unname(tools::md5sum(settings$file)),

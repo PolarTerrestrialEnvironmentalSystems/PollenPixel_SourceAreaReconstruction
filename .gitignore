@@ -8,3 +8,4 @@
 !/tests/export_regression_metrics.R
 !/tests/test_compare_regression.py
 !/tests/workers.R
+!/tests/ice_layers.R

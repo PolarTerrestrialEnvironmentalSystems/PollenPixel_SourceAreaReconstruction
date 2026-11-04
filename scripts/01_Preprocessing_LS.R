@@ -706,19 +706,6 @@ for(pp in psa_selection) {
   
   # -------------------------------------------------------------------------------------------------
   
-  ### save overview tables every 50 sites:
-  
-  if(i %% 2 == 0 | i == length(psa_selection)) {
-    
-    write.table(errorTab, 
-                file = glue::glue("{project_dir}2024_02_13_logfile_until_pixelflow_part1.csv"), 
-                sep="\t", 
-                row.names=FALSE)
-    
-  }
-  
-  # -------------------------------------------------------------------------------------------------
-  
 }
 
 if (any(errorTab$status == "failed", na.rm = TRUE)) {

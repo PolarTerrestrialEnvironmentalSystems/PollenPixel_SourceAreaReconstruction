@@ -74,3 +74,9 @@ sapply(packages,
        check_and_load,
        USE.NAMES = FALSE)
 sf_use_s2(FALSE)
+
+# Ice is downloaded independently of the main archive, including on existing
+# installations. Validation needs terra, so run it after package setup.
+source("scripts/ice_cover.R")
+configure_spatial_runtime()
+ice_source <- prepare_ice_cover()

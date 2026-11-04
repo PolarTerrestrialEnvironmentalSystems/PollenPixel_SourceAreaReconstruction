@@ -1,2 +1,6 @@
 /input
 /landcoverchange
+/tests/*
+!/tests/compare_landcover.py
+!/tests/test_compare_landcover.py
+!/tests/README.txt

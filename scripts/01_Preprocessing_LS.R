@@ -8,6 +8,7 @@
 
 #source functions scripts
 source("scripts/LandCoverChange_ElasticNet.R")
+source("scripts/ice_cover.R")
 
 #############
 ### Setup ###
@@ -38,12 +39,15 @@ psa_selection <- readLines(glue::glue("{metadata_path}/ala_sites.txt")) |>
 
 psa_selection <- psa_selection[1:2]
 
-errorTab <- tibble(ID = 1:length(psa_selection), 
-                   SA = psa_selection, 
-                   time = NA, 
-                   timeunit = NA, 
-                   status = NA, 
-                   errorMsg = NA)
+errorTab <- tibble(
+  ID = seq_along(psa_selection),
+  SA = psa_selection,
+  time = NA_real_,
+  timeunit = NA_character_,
+  status = NA_character_,
+  errorMsg = NA_character_,
+  stage = NA_character_
+)
 i <- 0
 for(pp in psa_selection) {
 
@@ -59,6 +63,7 @@ for(pp in psa_selection) {
   i <- i + 1
   
   timetrack <- Sys.time()
+  preprocessing_stage <- "directory_setup"
   failsafe  <- tryCatch({
   
   
@@ -83,6 +88,11 @@ for(pp in psa_selection) {
       createFolders(dir_out)
       fs::dir_tree(path = dir_out, recurse = TRUE)
     }
+
+    # Class policy changes calibration, RDA, and initialization together.
+    # Reuse only preprocessing products made with the same class configuration.
+    preprocessing_signature <- ice_preprocessing_signature(data_dir)
+    ice_preprocessing_cache(dir_out, preprocessing_signature)
   }
   
   #### 1.2 Spatial extent and resolution
@@ -120,6 +130,7 @@ for(pp in psa_selection) {
   
   #### 1.3 Create vegetation object for PSA
   {
+    preprocessing_stage <- "vegetation_setup"
     # load data, filter pollen source areas in region and/or calibration subset
     if(!file.exists(glue::glue("{dir_out}summaryResults/psaVeg.rda")) & check_files) {
       psaVeg <- make_psaVeg(ID, psa, radius, calibration_buffer, resolution, PSAmax, proj = "laea",
@@ -142,6 +153,7 @@ for(pp in psa_selection) {
   
   #### 2.1 Modern LandCover share
   {
+    preprocessing_stage <- "modern_vegetation"
     if(!file.exists(glue::glue("{dir_out}psaEnv/modernVegetation.rda"))) {
       ### modern time threshold for calibration
       modern_age_threshold <- 1000 
@@ -154,17 +166,23 @@ for(pp in psa_selection) {
       save(modernVegetation, file = glue::glue("{dir_out}/psaEnv/modernVegetation.rda"))
     } else load(glue::glue("{dir_out}/psaEnv/modernVegetation.rda"))
     
-    class_defs <- readxl::read_excel(glue::glue("{data_dir}/settings/landcover_class_definitions_mod.xlsx")) 
+    class_defs <- readxl::read_excel(
+      file.path(data_dir, "settings", "landcover_class_definitions_mod.xlsx")
+    ) %>%
+      ice_class_definitions()
   } ## end 2.1
   
   #### 2.2 CCI LandCover map of PSA
   {
+    preprocessing_stage <- "landcover_map"
     roi_sf  <- psaVeg@regionMap %>% 
       st_transform(4326)
     roi     <- roi_sf %>% 
       st_shift_longitude() %>% 
       sf_as_ee()
-    #dataset <- ee$Image(glue::glue("users/slisovski/LandCoverChange/LandCover_CCI_{resolution}"))
+    dataset <- ee$Image(
+      glue::glue("users/slisovski/LandCoverChange/LandCover_CCI_{resolution}")
+    )
     
     if(!file.exists(glue::glue("{dir_out}/summaryResults/dataset_rast.tiff")) & check_files) {
       if(diff(range(st_coordinates(roi_sf)[,1]))<100) {
@@ -199,6 +217,7 @@ for(pp in psa_selection) {
   
   #### 2.3 Modern LandCover shares in PSA
   { 
+    preprocessing_stage <- "landcover_shares"
     
     ### Classes present in buffer to use in calibration/prediction
     roi_maxbuffer = sf_as_ee(psaVeg@psas %>% filter(Dataset_ID==ID) %>% st_buffer(.$'Pollen_Source_Radius [m]' + (max_buffer*1000)) %>% 
@@ -210,18 +229,46 @@ for(pp in psa_selection) {
       scale      = dataset$projection()$nominalScale()$getInfo()
     )$getInfo()
     
-    filterLCover = tibble(Class_Code = as.numeric(names(classes_buffer$features[[1]][[4]][[6]])),
-                          count = unlist(classes_buffer$features[[1]][[4]][[6]])) %>%
-      left_join(class_defs %>% 
-                  mutate(Merge_To_Class = ifelse(!is.na(Merge_To_Class), Merge_To_Class, Class_Code)) %>%
-                  filter(Include_Class_In_Calibration) %>% 
-                  dplyr::select(Class_Code, Merge_To_Class), 
-                by = 'Class_Code') %>%
-      filter(!is.na(Merge_To_Class)) %>% 
-      group_by(Merge_To_Class) %>% 
-      summarise(count = sum(count)) %>% 
-      filter(count>=pxl_extract_PSA_buffer) %>%
+    buffer_counts <- classes_buffer$features[[1]][[4]][[6]]
+    calibration_classes <- class_defs %>%
+      mutate(
+        Merge_To_Class = ifelse(
+          is.na(Merge_To_Class), Class_Code, Merge_To_Class
+        )
+      ) %>%
+      filter(Include_Class_In_Calibration) %>%
+      dplyr::select(Class_Code, Merge_To_Class)
+
+    buffer_count_table <- tibble(
+      Class_Code = as.numeric(names(buffer_counts)),
+      count = as.numeric(unlist(buffer_counts))
+    )
+    class_counts <- buffer_count_table %>%
+      left_join(calibration_classes, by = "Class_Code") %>%
+      filter(!is.na(Merge_To_Class)) %>%
+      group_by(Merge_To_Class) %>%
+      summarise(count = sum(count)) %>%
       rename(Lcov = Merge_To_Class)
+
+    filterLCover <- class_counts %>%
+      filter(count >= pxl_extract_PSA_buffer)
+
+    lichen_count <- sum(buffer_count_table$count[buffer_count_table$Class_Code == 140])
+    lichen_status <- data.frame(
+      Dataset_ID = ID,
+      class = 140,
+      observed_pixels = lichen_count,
+      minimum_pixels = pxl_extract_PSA_buffer,
+      retained = FALSE,
+      stage = "class_policy",
+      reason = "Excluded by policy; modern lichens/mosses remain static beneath ice",
+      converted_pixels = 0L
+    )
+    write.csv(
+      lichen_status,
+      file.path(dir_out, "summaryResults", "class_140_status.csv"),
+      row.names = FALSE
+    )
     
     if(!file.exists(glue::glue("{dir_out}/summaryResults/lcovShares.rda"))) {
       
@@ -239,6 +286,7 @@ for(pp in psa_selection) {
   
   #### 2.4 Translate Vegetation to Landcover
   {
+    preprocessing_stage <- "vegetation_calibration"
     if(!file.exists(glue::glue("{dir_out}/summaryResults/veg_lc_model_new.rda")) & check_files) {
       Sys.unsetenv("LD_LIBRARY_PATH")
       cl <- parallel::makeCluster(20)
@@ -269,6 +317,7 @@ for(pp in psa_selection) {
   
   #### 3.1 Pixel selection
   {
+    preprocessing_stage <- "pixel_selection"
     if(!file.exists(glue::glue("{dir_out}/psaCrds/psaCrds.rda")) & check_files) {
       
       ## filterLCover
@@ -367,6 +416,7 @@ for(pp in psa_selection) {
   
   #### 3.2 Add climate variables & z-transformation parameters
   {
+    preprocessing_stage <- "environmental_predictors"
     threshold <- 0.15 ### 15 percentile of sample size across samples in one PSA
       
     load(glue::glue("{dir_out}/psaCrds/psaCrds.rda"))
@@ -438,6 +488,7 @@ for(pp in psa_selection) {
     
   #### 3.3 RDA models   
   {
+    preprocessing_stage <- "rda_models"
   
     ## env_stars: z-transformed environmental variables
     ## psaCrds:   coordinates of selected pixels per class
@@ -482,6 +533,7 @@ for(pp in psa_selection) {
     
   ### 3.4 plot RDA output
   {
+    preprocessing_stage <- "rda_figures"
     if(!file.exists(glue::glue("{dir_out}/summaryResults/rda_summary.png")) & check_files) {
       load(glue::glue("{dir_out}/psaOvlp/psaOvlp.rda"))
       plotRDAsummary(ID, dir_out, class_defs)
@@ -495,6 +547,7 @@ for(pp in psa_selection) {
   
   #### 4.1 Init Maps
   {
+    preprocessing_stage <- "initial_map"
 
    ## load(z-trans variables)
    load(glue::glue("{dir_out}/psaEnv/env_stars.rda"))
@@ -616,19 +669,42 @@ for(pp in psa_selection) {
   
   }
     
+    ice_preprocessing_cache(
+      dir_out,
+      preprocessing_signature,
+      complete = TRUE
+    )
+
   }, error = function(e) e)
   
   # -------------------------------------------------------------------------------------------------
   
-  if(any(class(failsafe)=="error")){ 
-    
-    errorTab[which(errorTab$ID == rr),5] <- "failed"
-    errorTab[which(errorTab$ID == rr),6] <- failsafe[1]
-    
-  }else{errorTab[which(errorTab$ID == rr),5] <- "ok"}
-  
-  errorTab[which(errorTab$ID == rr),3] <- round(as.numeric(difftime(Sys.time(), timetrack, units = "mins")), digits =2) 
-  errorTab[which(errorTab$ID == rr),4] <- "min"
+  # rr addresses the full metadata table; it is not a row of this selection's
+  # status table. Match the dataset ID so failures cannot disappear from logs.
+  log_row <- match(pp, errorTab$SA)
+  errorTab$stage[log_row] <- preprocessing_stage
+  errorTab$time[log_row] <- round(
+    as.numeric(difftime(Sys.time(), timetrack, units = "mins")),
+    digits = 2
+  )
+  errorTab$timeunit[log_row] <- "min"
+
+  if (inherits(failsafe, "error")) {
+    errorTab$status[log_row] <- "failed"
+    errorTab$errorMsg[log_row] <- conditionMessage(failsafe)
+    message(
+      "PSA ", pp, " preprocessing failed at ", preprocessing_stage, ": ",
+      conditionMessage(failsafe)
+    )
+  } else {
+    errorTab$status[log_row] <- "ok"
+  }
+
+  write.csv(
+    errorTab,
+    file.path(project_dir, "preprocessing_status.csv"),
+    row.names = FALSE
+  )
   
   # -------------------------------------------------------------------------------------------------
   
@@ -645,4 +721,18 @@ for(pp in psa_selection) {
   
   # -------------------------------------------------------------------------------------------------
   
+}
+
+if (any(errorTab$status == "failed", na.rm = TRUE)) {
+  failed <- errorTab[errorTab$status == "failed", ]
+  details <- paste0(
+    "PSA ", failed$SA, " [", failed$stage, "]: ", failed$errorMsg,
+    collapse = "\n"
+  )
+  stop(
+    "Preprocessing failed; pixel flow was not started.\n",
+    details,
+    "\nSee ", file.path(project_dir, "preprocessing_status.csv"),
+    call. = FALSE
+  )
 }

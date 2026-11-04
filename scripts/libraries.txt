@@ -1,12 +1,12 @@
 tidyverse
 glue
-tensorflow
 rgee
 tibble
 readr
 readxl
 sf
 stars
+terra
 patchwork
 glmnet
 vegan
@@ -26,4 +26,3 @@ rnaturalearth
 rnaturalearthdata
 geojsonio
 lwgeom
-keras

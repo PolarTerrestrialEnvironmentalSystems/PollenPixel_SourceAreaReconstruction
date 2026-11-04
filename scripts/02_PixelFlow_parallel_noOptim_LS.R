@@ -1,581 +1,497 @@
 #################################
-### Template: LandCoverChange ###
-### 22.10.2023                ###
-###  Linux 5/1                ###
+### PollenPixel: pixel flow    ###
 #################################
 rm(list = ls())
 
 nodes <- 10
 
-suppressMessages({
-  library(tidyr)
+suppressPackageStartupMessages({
   library(dplyr)
+  library(tidyr)
   library(tibble)
   library(readr)
   library(readxl)
-  library(sf); sf_use_s2(FALSE)
+  library(sf)
   library(stars)
   library(ggplot2)
-  library(patchwork)
-  library(transport)
-  library(lpSolve)
   library(vegan)
+  library(terra)
 })
+sf_use_s2(FALSE)
 
-#############
-### Setup ###
-#############
+source("scripts/LandCoverChange_ElasticNet.R")
+source("scripts/ice_cover.R")
+configure_spatial_runtime()
 
-### Project folder
 project_dir <- "landcoverchange"
-rda_dir     <- "landcoverchange"
-data_dir    <- "input"
+rda_dir <- "landcoverchange"
+data_dir <- "input"
+ice_settings <- ice_cover_settings(data_dir)
+ice_source <- prepare_ice_cover(ice_settings)
 
-
-### LogFile
-#read alaska sites
-ala_sites <- readLines("input/data/psa_metadata/ala_sites.txt") %>%  
-  tail(-1) %>% 
+ala_sites <- readLines("input/data/psa_metadata/ala_sites.txt") |>
+  tail(-1) |>
   as.numeric()
-{
-  #get directory names from rda files
-  rda_files    <- tibble(Name = list.files(rda_dir)) %>% 
-    mutate(PSA = grepl("PSA", Name, fixed = TRUE)) %>%
-    filter(PSA) %>% 
-    mutate(ID = sapply(strsplit(Name, "_"), 
-                       function(x) as.numeric(x[[2]]))) %>%
-    dplyr::select(-PSA) %>%
-    mutate(lat = as.numeric(sapply(strsplit(Name, "_"), 
-                                   function(x) gsub("N", "", x[[length(x)]])))) %>% 
-    filter(ID %in% ala_sites)
+
+rda_files <- tibble(Name = list.files(rda_dir)) %>%
+  filter(grepl("^PSA_", Name)) %>%
+  mutate(
+    ID = as.numeric(vapply(strsplit(Name, "_"), function(parts) parts[2], ""))
+  ) %>%
+  filter(ID %in% ala_sites)
+
+plot_landcover_flow <- function(LcovOut, class_defs, dir_out) {
+  legend <- class_defs %>%
+    mutate(lcov = ifelse(is.na(Merge_To_Class), Class_Code, Merge_To_Class)) %>%
+    filter(!is.na(Color_Code), !duplicated(lcov))
+
+  layer_count <- dim(LcovOut)[3]
+  for (page in seq_len(ceiling(layer_count / 25))) {
+    layers <- seq.int((page - 1) * 25 + 1, min(page * 25, layer_count))
+    maps <- ggplot() +
+      geom_stars(
+        data = LcovOut[, , , layers],
+        mapping = aes(fill = as.factor(LandcoverChange))
+      ) +
+      facet_wrap(~attributes, ncol = 5) +
+      scale_fill_manual(
+        values = setNames(legend$Color_Code, legend$lcov),
+        breaks = legend$lcov,
+        labels = legend$Class_Plotlabel,
+        name = "Landcover"
+      ) +
+      theme_void() +
+      theme(legend.position = "top")
+
+    ggsave(
+      file.path(dir_out, "summaryResults", paste0("changeMap_", page, "_new.png")),
+      plot = maps,
+      width = 30,
+      height = 4 + 6 * ceiling(length(layers) / 5),
+      units = "cm",
+      limitsize = FALSE,
+      bg = "white"
+    )
+  }
 }
 
-#function do the pixel flow per site
 site_pixel_flow <- function(run) {
-  ID      <- rda_files$ID[run]
-  name    <- rda_files$Name[run]
-  dir_out <- glue::glue("{project_dir}/{name}")
-  
-  ### Create folder and copy files
-  {
-    if (!file.exists(dir_out)) {
-      dir.create(dir_out, recursive = TRUE)
-      invisible(
-        lapply(
-          c("psaChange", "summaryResults"),
-          function(x) dir.create(glue::glue("{dir_out}/{x}"))
-        )
-      )
-    }
-    
-    ## Move files
-    fls <- list.files(
-      glue::glue("{rda_dir}/{rda_files$Name[run]}"),
-      recursive = TRUE
-    )
-    
-    # invisible(
-    #   lapply(
-    #     c("map_init.png", "map_init_withHuman", "Map.png", "rda_summary.png"),
-    #     function(x) {
-    #       if (any(grepl(x, fls, fixed = TRUE))) {
-    #         file.copy(
-    #           glue::glue("{rda_dir}/{rda_files$Name[run]}/{fls[which(grepl(x, fls, fixed = TRUE))]}"),
-    #           glue::glue("{project_dir}/{rda_files$Name[run]}/{fls[which(grepl(x, fls, fixed = TRUE))]}"),
-    #           overwrite = TRUE
-    #         )
-    #       }
-    #     }
-    #   )
-    # )
-  }
-  
-  runOut <- suppressWarnings(
-    suppressMessages(
-      tryCatch({
-        
-        #### class definitions
-        {
-          ## Class defs
-          class_defs <- readxl::read_excel(
-            glue::glue("{data_dir}/settings/landcover_class_definitions_mod.xlsx")
-          )
-          
-          ## Native resolution = 309.2208 meter, possible options: 300, 3000, 5000, 10000
-          resolution <- 300
-          
-          ## Pixel per class for RDA
-          pxl_extract_PSA        <- 800
-          pxl_extract_PSA_buffer <- 50
-          
-          ## Maximal spatial buffer around PSA
-          max_buffer <- 1000
-          
-          ## Flow cost parameters
-          envs  <- c(0, 100)
-          dists <- c(0, 100)
-          distF <- 0.05
-          
-          ## Human classes will be transfered with (TRUE) or without (FALSE)
-          ## scaling in relation to landcover distribution in PSA
-          scaleDensity <- TRUE
-        }
-        
-        ###################################
-        ### Pixel flow                  ###
-        ###################################
-        
-        #### 4.2 Pixel Flow
-        if (!file.exists(glue::glue("{dir_out}/psaChange/LcovOut_new.rda"))) {
-          
-          # loading data created during preprocessing
-          load(glue::glue("{rda_dir}/{name}/summaryResults/initRast.rda"))
-          load(glue::glue("{rda_dir}/{name}/summaryResults/rdaOut.rda"))
-          load(glue::glue("{rda_dir}/{name}/summaryResults/psaLCover_new.rda"))
-          load(glue::glue("{rda_dir}/{name}/psaOvlp/psaOvlp.rda"))
-          load(glue::glue("{rda_dir}/{name}/psaEnv/env_stars.rda"))
-          
-          ### Landcover classes
-          lcovs     <- st_dimensions(psaOvlp@densities)$attributes$values
-          lcovs_num <- as.numeric(gsub("LC_", "", lcovs))
-          
-          ### Flow table
-          psaFlow <- psaLCover@landcover_ts %>% 
-            filter(Dataset_ID == ID, Age > 500) %>%
-            group_split(Age) %>%
-            Reduce("rbind", .)
-          
-          # point sf with pixel_ID and landcover
-          init_crds <- initRast[1] %>% 
-            st_as_sf(na.rm = FALSE) %>% 
-            st_centroid() %>%
-            rowid_to_column(var = "pxlID") %>% 
-            relocate("pxlID", .before = "Landcover") %>%
-            filter(Landcover %in% as.numeric(names(psaFlow)[-c(1, 2)])) %>% 
-            suppressWarnings()
-          
-          #df with environmental vars for each pixel
-          init_env <- st_extract(env_stars, init_crds) %>% 
-            st_as_sf() %>% 
-            st_drop_geometry() %>%
-            apply(., 2, function(x) {
-              x[is.na(x)] <- median(x, na.rm = TRUE)
-              x
-            }) %>% 
-            suppressMessages()
-          
-          # rda coordinates for each pixel
-          init_rda <- as.data.frame(
-            predict(
-              psaOvlp@rda_mod[[1]],
-              init_env %>% as.data.frame(),
-              type = "wa",
-              scaling = 1
-            )
-          ) %>% 
-            dplyr::select("RDA1", "RDA2") %>% 
-            st_as_sf(coords = c("RDA1", "RDA2"))
-          
-          # landcover density at pixel
-          init_ovlp <- init_rda %>%
-            st_extract(
-              lapply(1:dim(psaOvlp@densities)[3], function(x) {
-                split(psaOvlp@densities)[x, ] %>% setNames("densities")
-              }) %>% 
-                do.call("c", .) %>% 
-                setNames(lcovs) %>% 
-                merge(),
-              .
-            ) %>% 
-            st_as_sf() %>% 
-            st_drop_geometry()
-          
-          # get centers for land cover classes in RDA space
-          distCentre <- lapply(1:dim(psaOvlp@densities)[3], function(x) {
-            tmp <- split(psaOvlp@densities)[x]
-            min <- tmp %>% 
-              st_as_sf() %>% 
-              pull(1) %>% 
-              which.max()
-            tmp %>% 
-              st_as_sf() %>% 
-              slice(min) %>% 
-              st_centroid() %>% 
-              st_geometry() %>% 
-              suppressWarnings()
-          })
-          
-          # distance of each pixel to the centers of landcover classes
-          init_dist <- distCentre %>% 
-            lapply(function(x) {
-              as.numeric(st_distance(init_rda, x))
-            }) %>% 
-            Reduce("cbind", .) %>% 
-            as_tibble() %>% 
-            setNames(names(init_ovlp)) %>% 
-            suppressWarnings()
-          
-          ## costs (with scaling)
-          if (!is.null(envs)) {
-            envs_scale <- max(envs) - scales::rescale(init_ovlp %>% as.matrix(), envs)
-          } else {
-            envs_scale <- max(init_ovlp %>% as.matrix(), na.rm = TRUE) - init_ovlp %>% as.matrix()
-          }
-          
-          if (!is.null(dists)) {
-            dist_scale <- scales::rescale(init_dist %>% as.matrix(), dists)
-          } else {
-            dist_scale <- init_dist %>% as.matrix()
-          }
-          
-          costs <- abind::abind(envs_scale, dist_scale * distF, along = 3) %>%
-            apply(., 1:2, sum, na.rm = TRUE)
-          
-          classFlow <- matrix(
-            nrow = nrow(init_env),
-            ncol = length(psaFlow$Age %>% unique()) + 1
-          )
-          
-          classFlow[, 1] <- init_crds$Landcover
-          
-          #### start FLOW ####
-          NA_survey <- data.frame(
-            col = numeric(),
-            from = numeric(),
-            na_count = numeric()
-          )
-          
-          for (y in 2:ncol(classFlow)) {
-            print(y)
-            
-            old_p <- ((tibble(lcov = classFlow[, y - 1]) %>% 
-                         group_by(lcov) %>% 
-                         summarize(p = n()) %>%
-                         right_join(tibble(lcov = lcovs_num), by = "lcov") %>% 
-                         mutate(p = ifelse(is.na(p), 0, p)) %>%
-                         arrange(lcov) %>% 
-                         pull(p)) / nrow(classFlow)) * 100
-            
-            new_p <- as.numeric(unlist(psaFlow %>% filter(Age == (psaFlow$Age %>% unique())[y-1]))[-c(1,2)])
-            
-            costM <- 1 - psaOvlp@overlapp[, , 2]
-            
-            flow <- transport(old_p, 
-                              new_p, 
-                              costM, 
-                              fullreturn = FALSE) %>% 
-              as_tibble() %>%
-              mutate(from = lcovs_num[from], to = lcovs_num[to]) %>% 
-              filter(from != to) %>%
-              mutate(
-                ident = apply(
-                  .,
-                  1,
-                  function(x) glue::glue("{min(as.numeric(x[1:2]))}_{max(as.numeric(x[1:2]))}")
-                )
-              ) %>%
-              group_split(ident) %>% 
-              lapply(function(x) {
-                if (nrow(x) > 1) {
-                  diff <- x %>% 
-                    pull(mass) %>% 
-                    diff() %>% 
-                    abs()
-                  x[which.max(x %>% pull(mass)), ] %>% 
-                    mutate(mass = diff)
-                } else {
-                  x
-                }
-              }) %>% 
-              Reduce("rbind", .) %>% 
-              dplyr::select(-ident) %>%
-              mutate(nrPxl = floor(nrow(classFlow) * mass / 100)) %>% 
-              arrange(from) %>% 
-              group_split(from)
-            
-            flip_pixels <- function(x) {
-              cost_sub <- tibble(index = 1:nrow(costs)) %>% 
-                bind_cols(costs) %>%     
-                filter(classFlow[, y - 1] == unique(x$from)) %>%
-                dplyr::select(
-                  index,
-                  lcovs[lcovs_num %in% (x %>% pull(to))]
-                ) %>%
-                arrange(apply(.[, -1], 1, sum)) %>% 
-                mutate(newClass = NA, .after = index)
-              
-              trans_remain <- x
-              
-              for (rep in 1:5) {
-                preselect <- apply(
-                  cost_sub[, glue::glue("LC_{trans_remain$to}")],
-                  1,
-                  function(x) which.min(x)
-                )
-                
-                cost_sub   <- cost_sub %>% left_join((trans_remain %>% group_split(to) %>% lapply(function(y) {
-                  cost_sub %>% 
-                    mutate(newClass_sub = trans_remain$to[preselect]) %>%
-                    filter(newClass_sub == y$to) %>% arrange(glue::glue("LC_{y$to}")) %>%
-                    slice(1:(min(c(y$nrPxl, nrow(.)))))
-                }) %>% Reduce("rbind", .) %>% dplyr::select(index, newClass_sub)), by = 'index') %>%
-                  mutate(newClass = ifelse(!is.na(newClass_sub) & is.na(newClass), newClass_sub, newClass)) %>%
-                  dplyr::select(-newClass_sub)
-                
-                trans_remain <- x %>% 
-                  group_split(to) %>% 
-                  lapply(function(y2) {
-                    y2 %>% mutate(nrPxl = nrPxl - sum(cost_sub$newClass == y2$to, na.rm = TRUE))
-                  }) %>% 
-                  Reduce("rbind", .) %>% 
-                  filter(nrPxl > 0)
-                
-                if (nrow(trans_remain) < 1) break
-              }
-              
-              NAS <- sum(is.na(cost_sub$newClass))
-              
-              survey <- c(
-                col = y,
-                from = unique(x$from),
-                na_count = NAS
-              )
-              
-              NA_survey[nrow(NA_survey) + 1, ] <<- survey
-              
-              cost_sub %>% dplyr::select(index, newClass)
-            }
-            
-            index_change <- lapply(flow, flip_pixels) %>% 
-              Reduce("rbind", .) %>% 
-              filter(!is.na(newClass))
-            
-            classFlow[, y] <- classFlow[, y - 1]
-            classFlow[index_change %>% pull(index), y] <- index_change %>% pull(newClass)
-          }
-          
-          
-          #### end FLOW ####
-          NA_survey %>% 
-            group_by(col) %>% 
-            summarize(na_count = sum(na_count)) %>% 
-            print(n = 23)
-          
-          test_out <- lapply(1:ncol(classFlow), function(x) {
-            (as_tibble(classFlow)[, x]) %>%
-              table(.) %>% 
-              as_tibble() %>% 
-              mutate(P = (n / nrow(classFlow)) * 100) %>%
-              dplyr::select(1, 3) %>% 
-              setNames(c("LCov", "P")) %>%
-              full_join(tibble(LCov = as.character(lcovs_num)), by = "LCov") %>%
-              arrange(LCov) %>% 
-              mutate(P = ifelse(is.na(P), 0, P)) %>%
-              mutate(Age = as.numeric(c(-1000, psaFlow$Age)[x]), Type = "pred") %>%
-              bind_rows(
-                psaFlow %>% 
-                  filter(Age == as.numeric(c(-1000, psaFlow$Age)[x])) %>%
-                  pivot_longer(-c(Age, Dataset_ID)) %>%
-                  dplyr::select(name, value, Age) %>%
-                  mutate(type = "orig") %>% 
-                  setNames(c("LCov", "P", "Age", "Type"))
-              )
-          }) %>% 
-            Reduce("rbind", .)
-          
-          pl <- ggplot(
-            test_out,
-            aes(x = P, y = Age, color = Type)
-          ) +
-            geom_path() +
-            facet_wrap(~LCov)
-          
-          ggsave(
-            glue::glue("{dir_out}/summaryResults/flow_comparison_new.png"),
-            plot = pl,
-            width = 30,
-            height = 22,
-            units = "cm"
-          )
-          
-          psaPixelFlow <- list(
-            crds = init_crds %>% dplyr::select(-Landcover),
-            flow = classFlow %>%
-              as_tibble() %>%
-              setNames(glue::glue("LCov_{c(-1000, psaFlow$Age)}"))
-          )
-          
-          save(
-            psaPixelFlow,
-            file = glue::glue("{dir_out}/psaChange/psaPixelFlow_new.rda")
-          )
-        }
-        
-        #### 4.3 Output Maps
-        if (!file.exists(glue::glue("{dir_out}/psaChange/LcovOut_new.tif"))) {
-          load(glue::glue("{dir_out}/psaChange/psaPixelFlow_new.rda"))
-          load(glue::glue("{rda_dir}/{name}/summaryResults/initRast.rda"))
-          
-          LcovOut <- lapply(1:ncol(psaPixelFlow$flow), function(x) {
-            rast <- initRast[1] %>% setNames(names(psaPixelFlow$flow)[x])
-            rast[[1]][psaPixelFlow$crds$pxlID] <- as.numeric(unlist(psaPixelFlow$flow[, x]))
-            rast
-          }) %>% 
-            do.call("c", .) %>% 
-            merge() %>% 
-            setNames("LandcoverChange")
-          
-          save(LcovOut, 
-               file = glue::glue("{dir_out}/psaChange/LcovOut_new.rda"))
-          
-          terra::writeRaster(
-            as(LcovOut, "SpatRaster"),
-            filename = glue::glue("{dir_out}/psaChange/LcovOut_new.tif")
-          )
-          
-          #### Figures
-          mergeTab <- class_defs %>% 
-            mutate(
-              lcov = ifelse(
-                is.na(Merge_To_Class),
-                Class_Code,
-                Merge_To_Class
-              )
-            ) %>%
-            dplyr::select(
-              Class_Code, lcov, Class_Plotlabel,
-              Predicted_In_Past, Color_Code, Transfer
-            )
-          
-          dim <- as.numeric(dim(LcovOut)[3])
-          
-          for (i in 1:ceiling(dim / 25)) {
-            maps <- ggplot() +
-              geom_stars(
-                data = LcovOut[, , , which(cut(1:dim, seq(0, 200, by = 25), labels = FALSE) == i)],
-                mapping = aes(fill = as.factor(LandcoverChange))
-              ) +
-              facet_wrap(~attributes, ncol = 5, nrow = 5) +
-              scale_fill_manual(
-                values = mergeTab %>% filter(!is.na(Color_Code), !duplicated(lcov)) %>% pull(Color_Code),
-                breaks = mergeTab %>% filter(!is.na(Color_Code), !duplicated(lcov)) %>% pull(lcov),
-                labels = mergeTab %>% filter(!is.na(Color_Code), !duplicated(lcov)) %>% pull(Class_Plotlabel),
-                name = "Landcover"
-              ) +
-              theme_void() +
-              theme(legend.position = "top")
-            
-            ggsave(
-              glue::glue("{project_dir}/{name}/summaryResults/changeMap_{i}_new.png"),
-              plot = maps,
-              width = 6 * 5,
-              height = 4 + 6 * ceiling(length(which(cut(1:dim, seq(0, 200, by = 25), labels = FALSE) == i)) / 5),
-              units = "cm",
-              limitsize = FALSE,
-              bg = "white"
-            )
-          }
-        }
-        
-      }, error = function(e) e)
-    )
-  )
-  
-  if (any(class(runOut) %in% "error")) {
-    png(glue::glue("{dir_out}/summaryResults/error_new.png"))
-    plot(
-      1:10, 1:10,
-      type = "n",
-      xaxt = "n",
-      yaxt = "n",
-      xlab = "",
-      ylab = ""
-    )
-    text(5, 5, glue::glue("Error Message: \n {runOut$message}"), cex = 2)
-    dev.off()
-  }
-  
-  ## end psaPixelFlow.rda
-  if (
-    file.exists(glue::glue("{dir_out}/psaChange/LcovOut_new.rda")) &
-    !any(
-      sapply(
-        list.files(glue::glue("{dir_out}/summaryResults"), pattern = ".png"),
-        function(x) any(c(grepl("error", x, fixed = TRUE), grepl("changeMap", x, fixed = TRUE)))
-      )
-    )
-  ) {
-    load(glue::glue("{dir_out}/psaChange/LcovOut_new.rda"))
+  ID <- rda_files$ID[run]
+  name <- rda_files$Name[run]
+  dir_out <- file.path(project_dir, name)
+  input_dir <- file.path(rda_dir, name)
+  summary_dir <- file.path(dir_out, "summaryResults")
+  flow_dir <- file.path(dir_out, "psaChange")
+  dir.create(summary_dir, recursive = TRUE, showWarnings = FALSE)
+  dir.create(flow_dir, recursive = TRUE, showWarnings = FALSE)
+
+  tryCatch({
     class_defs <- readxl::read_excel(
-      glue::glue("{data_dir}/settings/landcover_class_definitions_mod.xlsx")
+      file.path(data_dir, "settings", "landcover_class_definitions_mod.xlsx")
+    ) %>%
+      ice_class_definitions()
+
+    # Class 140 affects calibration and RDA, not just allocation. Old products
+    # must be rebuilt by preprocessing before the new flow can use them.
+    preprocessing_manifest <- file.path(
+      input_dir, "summaryResults", "ice_preprocessing.rds"
     )
-    
-    mergeTab <- class_defs %>% 
-      mutate(lcov = ifelse(is.na(Merge_To_Class), Class_Code, Merge_To_Class)) %>%
-      dplyr::select(
-        Class_Code, lcov, Class_Plotlabel,
-        Predicted_In_Past, Color_Code, Transfer
-      )
-    
-    dim <- as.numeric(dim(LcovOut)[3])
-    
-    for (i in 1:ceiling(dim / 25)) {
-      maps <- ggplot() +
-        geom_stars(
-          data = LcovOut[, , , which(cut(1:dim, seq(0, 200, by = 25), labels = FALSE) == i)],
-          mapping = aes(fill = as.factor(LandcoverChange))
-        ) +
-        facet_wrap(~attributes, ncol = 5, nrow = 5) +
-        scale_fill_manual(
-          values = mergeTab %>% filter(!is.na(Color_Code), !duplicated(lcov)) %>% pull(Color_Code),
-          breaks = mergeTab %>% filter(!is.na(Color_Code), !duplicated(lcov)) %>% pull(lcov),
-          labels = mergeTab %>% filter(!is.na(Color_Code), !duplicated(lcov)) %>% pull(Class_Plotlabel),
-          name = "Landcover"
-        ) +
-        theme_void() +
-        theme(legend.position = "top")
-      
-      ggsave(
-        glue::glue("{project_dir}/{name}/summaryResults/changeMap_{i}_new.png"),
-        plot = maps,
-        width = 6 * 5,
-        height = 4 + 6 * ceiling(length(which(cut(1:dim, seq(0, 200, by = 25), labels = FALSE) == i)) / 5),
-        units = "cm",
-        limitsize = FALSE,
-        bg = "white"
-      )
+    expected_preprocessing <- ice_preprocessing_signature(data_dir)
+    if (!file.exists(preprocessing_manifest) ||
+        !identical(readRDS(preprocessing_manifest), expected_preprocessing)) {
+      stop("Preprocessing is outdated; run scripts/01_Preprocessing_LS.R first.")
     }
-  }
+
+    input_files <- c(
+      file.path(input_dir, "summaryResults", c(
+        "initRast.rda", "psaLCover_new.rda", "psaVeg.rda"
+      )),
+      file.path(input_dir, "psaOvlp", "psaOvlp.rda"),
+      file.path(input_dir, "psaEnv", "env_stars.rda")
+    )
+    if (!all(file.exists(input_files))) stop("Missing site preprocessing files.")
+    signature <- ice_cache_key(list(
+      settings = ice_settings,
+      source = ice_source$checksum,
+      preprocessing = expected_preprocessing,
+      inputs = tools::md5sum(input_files),
+      flow_code = tools::md5sum(c(
+        "scripts/02_PixelFlow_parallel_noOptim_LS.R",
+        "scripts/ice_cover.R"
+      ))
+    ))
+    manifest_file <- file.path(flow_dir, "ice_flow_manifest.rds")
+    cached_manifest <- if (file.exists(manifest_file)) {
+      readRDS(manifest_file)
+    } else {
+      NULL
+    }
+    expected_outputs <- c(
+      file.path(flow_dir, c(
+        "psaPixelFlow_new.rda", "LcovOut_new.rda", "LcovOut_new.tif"
+      )),
+      file.path(summary_dir, c(
+        "ice_cover_log.csv", "vegetation_proportions.csv",
+        "flow_comparison_new.png", "changeMap_1_new.png",
+        "class_140_status.csv"
+      ))
+    )
+    if (is.list(cached_manifest) &&
+        identical(cached_manifest$signature, signature) &&
+        all(file.exists(c(
+          expected_outputs, cached_manifest$masks, cached_manifest$layers
+        )))) {
+      message("PSA ", ID, ": reusing compatible ice-aware pixel flow")
+      return(data.frame(ID = ID, status = "cached", message = ""))
+    }
+    if (file.exists(manifest_file) && !file.remove(manifest_file)) {
+      stop("Could not invalidate the incomplete flow cache manifest.")
+    }
+    stale_maps <- list.files(
+      summary_dir,
+      pattern = "^changeMap_[0-9]+_new[.]png$",
+      full.names = TRUE
+    )
+    if (length(stale_maps) && any(!file.remove(stale_maps))) {
+      stop("Could not invalidate outdated map figures.")
+    }
+
+    load(input_files[1]) # initRast
+    load(input_files[2]) # psaLCover
+    load(input_files[3]) # psaVeg
+    load(input_files[4]) # psaOvlp
+    load(input_files[5]) # env_stars
+
+    lcovs <- psaOvlp@lcov
+    class_ids <- as.numeric(sub("^LC_", "", lcovs))
+
+    psaFlow <- psaLCover@landcover_ts %>%
+      filter(Dataset_ID == ID, Age > 500) %>%
+      arrange(Age)
+    if (!nrow(psaFlow) || anyDuplicated(psaFlow$Age)) {
+      stop("Expected one vegetation target per reconstruction age.")
+    }
+    target_columns <- names(psaFlow)[!names(psaFlow) %in% c("Dataset_ID", "Age")]
+    if (!setequal(target_columns, as.character(class_ids))) {
+      stop("Vegetation prediction and RDA class sets differ; rebuild preprocessing.")
+    }
+    targets <- as.matrix(psaFlow[, as.character(class_ids), drop = FALSE])
+    if (any(!is.finite(targets)) || any(targets < 0) ||
+        any(rowSums(targets) <= 0)) {
+      stop("Invalid vegetation targets.")
+    }
+    targets <- 100 * targets / rowSums(targets)
+
+    output_ages <- c(-1000, psaFlow$Age)
+    ice_ages <- c(0, psaFlow$Age)
+    layer_lookup <- ice_layer_lookup(ice_settings$file, ice_ages, ice_settings)
+
+    template <- as(initRast[1], "SpatRaster")
+    base_values <- terra::values(template, mat = FALSE)
+    cell_ids <- vegetation_cell_ids(base_values, class_ids, ice_settings)
+    if (!length(cell_ids)) stop("No reconstructable vegetation pixels.")
+
+    # Terra cell IDs are retained explicitly through extraction, masks, and
+    # export; do not assume sf/stars and terra use the same flattened ordering.
+    coordinates <- terra::xyFromCell(template, cell_ids)
+    init_crds <- st_as_sf(
+      data.frame(
+        pxlID = cell_ids,
+        cellID = cell_ids,
+        Landcover = base_values[cell_ids],
+        x = coordinates[, 1],
+        y = coordinates[, 2]
+      ),
+      coords = c("x", "y"),
+      crs = terra::crs(template)
+    )
+
+    environment <- as(env_stars, "SpatRaster")
+    init_env <- terra::extract(
+      environment,
+      terra::vect(init_crds),
+      ID = FALSE
+    )
+    for (column in names(init_env)) {
+      missing <- !is.finite(init_env[[column]])
+      replacement <- median(init_env[[column]][!missing], na.rm = TRUE)
+      if (!is.finite(replacement)) {
+        stop("No valid modern environmental values for ", column)
+      }
+      init_env[[column]][missing] <- replacement
+    }
+
+    pixel_scores <- as.data.frame(predict(
+      psaOvlp@rda_mod[[1]],
+      newdata = init_env,
+      type = "wa",
+      scaling = 1
+    ))[, c("RDA1", "RDA2"), drop = FALSE]
+
+    # Modern ice pixels have no observed vegetation state. Seed once from the
+    # closest stored class centroid, and freeze that state while ice-covered.
+    initial_state <- init_crds$Landcover
+    needs_seed <- !initial_state %in% class_ids
+    initial_state[needs_seed] <- nearest_vegetation_class(
+      pixel_scores[needs_seed, , drop = FALSE],
+      psaOvlp@centers[, c("RDA1", "RDA2"), drop = FALSE],
+      class_ids
+    )
+
+    lichen_file <- file.path(summary_dir, "class_140_status.csv")
+    lichen_status <- read.csv(file.path(
+      input_dir, "summaryResults", "class_140_status.csv"
+    ))
+    lichen_status$retained <- FALSE
+    lichen_status$stage <- "class_policy"
+    lichen_status$reason <-
+      "Excluded by policy; modern lichens/mosses remain static beneath ice"
+    lichen_status$converted_pixels <- 0L
+    lichen_status$static_pixels <- sum(base_values == 140, na.rm = TRUE)
+    write.csv(lichen_status, lichen_file, row.names = FALSE)
+
+    # Preserve the existing environmental density and distance cost ingredients.
+    densities <- as(psaOvlp@densities, "SpatRaster")
+    density_order <- match(lcovs, names(densities))
+    if (anyNA(density_order)) stop("RDA density layer identifiers do not align.")
+    densities <- densities[[density_order]]
+    density_values <- as.matrix(terra::extract(
+      densities,
+      as.matrix(pixel_scores)
+    ))
+    density_values[!is.finite(density_values)] <- 0
+    environmental_cost <- 100 - scales::rescale(density_values, c(0, 100))
+
+    density_peaks <- t(vapply(seq_along(class_ids), function(column) {
+      peak <- which.max(terra::values(densities[[column]], mat = FALSE))
+      as.numeric(terra::xyFromCell(densities, peak))
+    }, numeric(2)))
+    distance_values <- vapply(seq_along(class_ids), function(column) {
+      sqrt(rowSums(sweep(as.matrix(pixel_scores), 2, density_peaks[column, ], "-")^2))
+    }, numeric(nrow(pixel_scores)))
+    pixel_costs <- environmental_cost +
+      0.05 * scales::rescale(distance_values, c(0, 100))
+    class_costs <- 1 - psaOvlp@overlapp[, , 2]
+
+    mask_files <- vapply(ice_ages, function(age) {
+      aligned_ice_mask(
+        ice_settings,
+        age,
+        template,
+        file.path(dir_out, "iceMasks"),
+        ice_source$checksum
+      )
+    }, character(1))
+    initial_ice <- ice_mask_values(mask_files[1])
+    previous_ice <- initial_ice[cell_ids]
+    previous_grid_ice <- initial_ice
+    exposed_ever <- rep(FALSE, length(cell_ids))
+    grid_exposed_ever <- rep(FALSE, length(base_values))
+
+    source_point <- psaVeg@psas %>% filter(Dataset_ID == ID)
+    source_polygon <- st_buffer(
+      source_point,
+      source_point[["Pollen_Source_Radius [m]"]]
+    )
+
+    classFlow <- matrix(initial_state, nrow = length(cell_ids), ncol = length(ice_ages))
+    diagnostics <- vector("list", length(ice_ages))
+    comparisons <- vector("list", length(ice_ages))
+    output_files <- character(length(ice_ages))
+
+    for (step in seq_along(ice_ages)) {
+      # Every exported cell needs a known mask, including water and background.
+      ice <- ice_mask_values(mask_files[step])
+      current_ice <- ice[cell_ids]
+      eligible <- !current_ice
+      switches <- 0L
+      newly_exposed <- rep(FALSE, length(cell_ids))
+      newly_covered <- rep(FALSE, length(cell_ids))
+      grid_newly_exposed <- rep(FALSE, length(base_values))
+      grid_newly_covered <- rep(FALSE, length(base_values))
+
+      if (step > 1) {
+        newly_exposed <- previous_ice & !current_ice
+        newly_covered <- !previous_ice & current_ice
+        exposed_ever <- exposed_ever | newly_exposed
+        grid_newly_exposed <- previous_grid_ice & !ice
+        grid_newly_covered <- !previous_grid_ice & ice
+        grid_exposed_ever <- grid_exposed_ever | grid_newly_exposed
+        allocation <- ice_free_pixel_flow(
+          previous = classFlow[, step - 1],
+          eligible = eligible,
+          class_ids = class_ids,
+          target_shares = targets[step - 1, ],
+          class_costs = class_costs,
+          pixel_costs = pixel_costs
+        )
+        classFlow[, step] <- allocation$state
+        switches <- allocation$switches
+      }
+
+      overlap <- ice_source_overlap(
+        mask_files[step], source_point, source_polygon
+      )
+      eligible_count <- sum(eligible)
+      counts <- tabulate(
+        match(classFlow[eligible, step], class_ids),
+        length(class_ids)
+      )
+      proportions <- if (eligible_count > 0) {
+        100 * counts / eligible_count
+      } else {
+        rep(NA_real_, length(class_ids))
+      }
+      requested <- if (step > 1) targets[step - 1, ] else rep(NA_real_, length(class_ids))
+
+      comparisons[[step]] <- data.frame(
+        Dataset_ID = ID,
+        Age = output_ages[step],
+        ice_age = ice_ages[step],
+        class = class_ids,
+        requested_percent = requested,
+        realized_percent = proportions,
+        pixels = counts,
+        eligible_pixels = eligible_count
+      )
+      diagnostics[[step]] <- data.frame(
+        Dataset_ID = ID,
+        Age = output_ages[step],
+        ice_age = ice_ages[step],
+        ice_layer = layer_lookup$layer_name[step],
+        modeled_pixels = length(cell_ids),
+        ice_free_pixels = eligible_count,
+        ice_covered_pixels = sum(current_ice),
+        unknown_pixels = sum(is.na(ice)),
+        newly_covered_pixels = sum(newly_covered),
+        newly_exposed_pixels = sum(newly_exposed),
+        unique_exposed_pixels = sum(exposed_ever),
+        grid_pixels = length(base_values),
+        grid_ice_covered_pixels = sum(ice),
+        grid_newly_covered_pixels = sum(grid_newly_covered),
+        grid_newly_exposed_pixels = sum(grid_newly_exposed),
+        grid_unique_exposed_pixels = sum(grid_exposed_ever),
+        switches = switches,
+        water_ice_overlap_pixels = sum(ice[which(base_values == 210)], na.rm = TRUE),
+        lichen_ice_overlap_pixels = sum(ice[which(base_values == 140)]),
+        source_point_ice = overlap$source_point_ice,
+        source_area_ice_fraction = overlap$source_area_ice_fraction
+      )
+      previous_ice <- current_ice
+      previous_grid_ice <- ice
+
+      output <- template
+      terra::values(output) <- ice_output_values(
+        base_values, cell_ids, classFlow[, step], ice, ice_settings
+      )
+      names(output) <- paste0("LCov_", output_ages[step])
+      output_files[step] <- file.path(flow_dir, paste0("LCov_", output_ages[step], ".tif"))
+      terra::writeRaster(output, output_files[step], overwrite = TRUE)
+    }
+
+    diagnostics <- bind_rows(diagnostics)
+    comparisons <- bind_rows(comparisons)
+    write.csv(
+      diagnostics,
+      file.path(summary_dir, "ice_cover_log.csv"),
+      row.names = FALSE
+    )
+    write.csv(
+      comparisons,
+      file.path(summary_dir, "vegetation_proportions.csv"),
+      row.names = FALSE
+    )
+
+    comparison_plot <- comparisons %>%
+      pivot_longer(
+        c(requested_percent, realized_percent),
+        names_to = "Type",
+        values_to = "P"
+      ) %>%
+      ggplot(aes(x = P, y = Age, color = Type)) +
+      geom_path(na.rm = TRUE) +
+      facet_wrap(~class)
+    ggsave(
+      file.path(summary_dir, "flow_comparison_new.png"),
+      plot = comparison_plot,
+      width = 30,
+      height = 22,
+      units = "cm"
+    )
+
+    psaPixelFlow <- list(
+      crds = init_crds %>% dplyr::select(-Landcover),
+      flow = as_tibble(classFlow, .name_repair = "minimal") %>%
+        setNames(paste0("LCov_", output_ages)),
+      ice_masks = mask_files,
+      ice_lookup = layer_lookup,
+      initial_vegetation = initial_state,
+      source = ice_source,
+      settings = ice_settings,
+      signature = signature
+    )
+    save(psaPixelFlow, file = file.path(flow_dir, "psaPixelFlow_new.rda"))
+
+    output_stack <- terra::rast(output_files)
+    terra::writeRaster(
+      output_stack,
+      file.path(flow_dir, "LcovOut_new.tif"),
+      overwrite = TRUE
+    )
+    LcovOut <- stars::st_as_stars(output_stack) %>% setNames("LandcoverChange")
+    save(LcovOut, file = file.path(flow_dir, "LcovOut_new.rda"))
+    plot_landcover_flow(LcovOut, class_defs, dir_out)
+
+    # Write last: a partially completed run must never look reusable.
+    saveRDS(
+      list(signature = signature, masks = mask_files, layers = output_files),
+      manifest_file
+    )
+    message("PSA ", ID, ": completed ice-aware pixel flow")
+    data.frame(ID = ID, status = "ok", message = "")
+  }, error = function(error) {
+    message("PSA ", ID, ": ", conditionMessage(error))
+    data.frame(ID = ID, status = "failed", message = conditionMessage(error))
+  })
 }
 
-### apply to all sites
-library(parallel)
-
-cl <- makeCluster(nodes)
-
-clusterEvalQ(cl,
-             suppressMessages({
-               library(tidyr)
-               library(dplyr)
-               library(tibble)
-               library(readr)
-               library(readxl)
-               library(sf); sf_use_s2(FALSE)
-               library(stars)
-               library(ggplot2)
-               library(patchwork)
-               library(transport)
-               library(lpSolve)
-               library(vegan)
-               library(terra)
-             }))
-
-clusterExport(cl,
-              ls())
-
-clusterApplyLB(cl,
-               1:nrow(rda_files),
-               site_pixel_flow)
-stopCluster(cl)
-
-
+# Workers open the NetCDF and mask files themselves. Terra objects contain
+# external pointers and must not be exported from the parent R process.
+cl <- parallel::makeCluster(nodes)
+parallel::clusterEvalQ(cl, {
+  suppressPackageStartupMessages({
+    library(dplyr)
+    library(tidyr)
+    library(tibble)
+    library(sf)
+    library(stars)
+    library(ggplot2)
+    library(vegan)
+    library(terra)
+  })
+  sf::sf_use_s2(FALSE)
+  source("scripts/LandCoverChange_ElasticNet.R")
+  source("scripts/ice_cover.R")
+  configure_spatial_runtime()
+  NULL
+})
+parallel::clusterExport(
+  cl,
+  c(
+    "project_dir", "rda_dir", "data_dir", "rda_files",
+    "ice_settings", "ice_source", "site_pixel_flow", "plot_landcover_flow"
+  )
+)
+results <- tryCatch(
+  parallel::clusterApplyLB(cl, seq_len(nrow(rda_files)), site_pixel_flow),
+  finally = parallel::stopCluster(cl)
+)
+results <- bind_rows(results)
+write.csv(
+  results,
+  file.path(project_dir, "ice_flow_status.csv"),
+  row.names = FALSE
+)
+if (any(results$status == "failed")) {
+  stop("Some sites failed; see landcoverchange/ice_flow_status.csv.")
+}

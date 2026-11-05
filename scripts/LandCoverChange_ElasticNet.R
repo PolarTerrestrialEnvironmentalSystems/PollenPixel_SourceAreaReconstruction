@@ -861,7 +861,14 @@ regressionModel <- function(psaVeg,
 }
 
 
-make_psaLCover <- function(ID, psaVeg, lcovShares, veg_lc_model, model_index = 1) {
+invalid_recent_pollen_rows <- function(samples, taxa_cols) {
+  predictors <- lapply(samples[, taxa_cols, drop = FALSE], function(x) suppressWarnings(as.numeric(x)))
+  invalid <- Reduce(`|`, lapply(predictors, function(x) !is.finite(x)))
+  which(invalid & is.finite(samples$Age) & samples$Age <= 500)
+}
+
+make_psaLCover <- function(ID, psaVeg, lcovShares, veg_lc_model, model_index = 1,
+                          omit_invalid_recent_ages = FALSE) {
   
   
   `%>%` <- dplyr::`%>%`
@@ -872,6 +879,14 @@ make_psaLCover <- function(ID, psaVeg, lcovShares, veg_lc_model, model_index = 1
   veg_pred_input <- psaVeg@vegetation %>%
     dplyr::filter(Interp, Dataset_ID == ID) %>%
     dplyr::select(dplyr::all_of(c("Dataset_ID", "Age", model_sub$taxa_cols)))
+  if (omit_invalid_recent_ages) {
+    omitted <- invalid_recent_pollen_rows(veg_pred_input, model_sub$taxa_cols)
+    if (length(omitted)) {
+      message("PSA ", ID, ": omitting invalid prediction ages ",
+              paste(veg_pred_input$Age[omitted], collapse = ", "))
+      veg_pred_input <- veg_pred_input[-omitted, , drop = FALSE]
+    }
+  }
   
   if (nrow(veg_pred_input) == 0) {
     stop("No interpolated vegetation rows found for Dataset_ID = ", ID)
@@ -1637,17 +1652,35 @@ make_psaOvlp <- function(rdaOut, range_axes = NULL) {
   classes    <- rownames(rdaOut$transl_lc_rds)
   
   ## Density per class
-  dens <- lapply(classes, function(cls) {
+  class_scores <- lapply(classes, function(cls) {
     scores <- rdaOut$vars_transf_rds_wa_sc_1 %>% filter(lcov == cls)
     if(nrow(scores)<2) {
       sd <- apply((rdaOut$vars_transf_rds_wa_sc_1 %>% group_by(lcov) %>% summarise(sd1 = sd(RDA1), sd2 = sd(RDA2)))[,2:3], 2, median, na.rm = T)
       scores <- tibble(lcov = scores$lcov, RDA1 = rnorm(5, scores$RDA1, sd[1]), RDA2 = rnorm(5, scores$RDA2, sd[2]))
     }
-    MASS::kde2d(x = scores %>% pull(RDA1), y =  scores %>% pull(RDA2), 
-                h = apply(scores[,2:3], 2, MASS::bandwidth.nrd), 
-                n = 100,
-                lims = as.numeric(c(range_axes[,1], range_axes[,2])))
+    scores[, c("RDA1", "RDA2")]
   })
+  densities <- function(bounds) lapply(class_scores, function(scores) {
+    MASS::kde2d(x = scores$RDA1, y = scores$RDA2,
+                h = vapply(scores, MASS::bandwidth.nrd, numeric(1)),
+                n = 100, lims = as.numeric(bounds))
+  })
+  dens <- densities(range_axes)
+  mass <- vapply(dens, function(grid) sum(grid$z), numeric(1))
+  if (any(mass == 0, na.rm = TRUE)) {
+    # Calibration samples can lie outside the site's environmental grid.
+    # Retain the bandwidths and samples while extending the grid to their scores.
+    scores <- do.call(rbind, class_scores)
+    bounds <- apply(rbind(range_axes, as.matrix(scores)), 2L, range)
+    if (any(bounds != range_axes)) {
+      message("PSA ", rdaOut$ID, ": extending RDA density grid to include calibration scores.")
+      dens <- densities(bounds)
+      mass <- vapply(dens, function(grid) sum(grid$z), numeric(1))
+    }
+  }
+  if (any(!is.finite(mass) | mass <= 0)) {
+    stop("Invalid RDA density mass for classes: ", paste(classes[!is.finite(mass) | mass <= 0], collapse = ", "))
+  }
   
   x_seq <- dens[[1]]$x
   y_seq <- dens[[2]]$y

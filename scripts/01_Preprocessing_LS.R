@@ -33,12 +33,9 @@ psa_metadata  <- read_csv(glue::glue("{metadata_path}/PSA_locations_northern_hem
                           show_col_types = F)
 
 
-#psa_selection  <- psa_metadata$Dataset_ID[1:5]
 psa_selection <- readLines(glue::glue("{metadata_path}/ala_sites.txt")) |> 
   tail(-1) |> 
   as.numeric()
-
-psa_selection <- psa_selection[1:2]
 
 errorTab <- tibble(
   ID = seq_along(psa_selection),
@@ -53,6 +50,16 @@ i <- 0
 for(pp in psa_selection) {
 
   rr <- which(psa_metadata$Dataset_ID==pp)
+  if (!length(rr)) {
+    row <- match(pp, errorTab$SA)
+    errorTab$stage[row] <- "directory_setup"
+    errorTab$status[row] <- "skipped"
+    errorTab$errorMsg[row] <- "No matching site metadata."
+    message("PSA ", pp, ": skipped because site metadata is missing.")
+    dir.create(project_dir, showWarnings = FALSE)
+    write.csv(errorTab, file.path(project_dir, "preprocessing_status.csv"), row.names = FALSE)
+    next
+  }
     
   cat("\n")
   print(paste0("PSA: ", 
@@ -301,10 +308,22 @@ for(pp in psa_selection) {
       
     } else load(glue::glue("{dir_out}/summaryResults/veg_lc_model_new.rda"))
     
-    if(!file.exists(glue::glue("{dir_out}/summaryResults/psaLCover_new.rda")) & check_files) {
-      psaLCover <- make_psaLCover(ID = ID, psaVeg, lcovShares, veg_lc_model)
-      save(psaLCover, file = glue::glue("{dir_out}/summaryResults/psaLCover_new.rda"))
-    } else load(glue::glue("{dir_out}/summaryResults/psaLCover_new.rda"))
+    prediction_file <- file.path(dir_out, "summaryResults", "psaLCover_new.rda")
+    if(!file.exists(prediction_file) & check_files) {
+      psaLCover <- make_psaLCover(ID = ID, psaVeg, lcovShares, veg_lc_model,
+                                omit_invalid_recent_ages = TRUE)
+      save(psaLCover, file = prediction_file)
+    } else load(prediction_file)
+
+    if (ID == 16238) {
+      predictions <- psaLCover@landcover_ts
+      older <- which(predictions$Dataset_ID == ID & predictions$Age > 26000)
+      if (length(older)) {
+        psaLCover@landcover_ts <- predictions[-older, , drop = FALSE]
+        backup <- ice_save_capped_prediction(psaLCover, prediction_file)
+        message("PSA ", ID, ": capped at 26000 years. Full predictions in ", basename(backup))
+      }
+    }
     
   } ## end 2.4
   
@@ -495,23 +514,24 @@ for(pp in psa_selection) {
     if(!file.exists(glue::glue("{dir_out}/psaOvlp/psaOvlp.rda")) & check_files) {
         
         load(glue::glue("{dir_out}/psaEnv/env_stars.rda")) ## env_stars
-        load(glue::glue("{dir_out}/psaCrds/psaCrds.rda"))  ## psaCrds
-        load(glue::glue("{dir_out}/psaEnv/psaEnv.rda"))    ## psaEnv
-        
-        datst <- psaCrds %>% st_drop_geometry() %>% dplyr::select(-Dataset_ID) %>%
-          bind_cols(psaEnv) %>% mutate(lcov = as.factor(lcov))
-        
-        sampleSize  <- datst %>% group_by(lcov) %>% summarise(sample = n())
-        thrsh       <- quantile(sampleSize$sample, probs = threshold)
-        
-        dataset_sub <- sampleSize %>% mutate(sample = ifelse(sample>thrsh, thrsh, sample)) %>% 
-          group_split(lcov) %>% lapply(., function(x) {
-            datst %>% filter(lcov == x$lcov) %>% arrange(dist) %>% dplyr::select(-dist) %>% slice(1:x$sample)
-          }) %>% Reduce("rbind", .) %>% mutate(source = "calibration")
-      
-        rdaOut <- rdaMod(dataset_sub %>% dplyr::select(-source), ID = ID)
-        
-        save(rdaOut, file = glue::glue("{dir_out}/summaryResults/rdaOut.rda"))
+        rda_file <- file.path(dir_out, "summaryResults", "rdaOut.rda")
+        if (file.exists(rda_file)) {
+          load(rda_file)
+        } else {
+          load(glue::glue("{dir_out}/psaCrds/psaCrds.rda"))
+          load(glue::glue("{dir_out}/psaEnv/psaEnv.rda"))
+          datst <- psaCrds %>% st_drop_geometry() %>% dplyr::select(-Dataset_ID) %>%
+            bind_cols(psaEnv) %>% mutate(lcov = as.factor(lcov))
+          sampleSize <- datst %>% group_by(lcov) %>% summarise(sample = n())
+          thrsh <- quantile(sampleSize$sample, probs = threshold)
+          dataset_sub <- sampleSize %>% mutate(sample = ifelse(sample > thrsh, thrsh, sample)) %>%
+            group_split(lcov) %>% lapply(., function(x) {
+              datst %>% filter(lcov == x$lcov) %>% arrange(dist) %>%
+                dplyr::select(-dist) %>% slice(1:x$sample)
+            }) %>% Reduce("rbind", .)
+          rdaOut <- rdaMod(dataset_sub, ID = ID)
+          save(rdaOut, file = rda_file)
+        }
         
         ### Overlap and centers
         #### ovlp range
@@ -526,7 +546,7 @@ for(pp in psa_selection) {
         psaOvlp <- make_psaOvlp(rdaOut, range_axes = apply(zTransEnvRDA, 2, range))
         
         save(psaOvlp, file = glue::glue("{dir_out}/psaOvlp/psaOvlp.rda"))
-      }
+      } else load(file.path(dir_out, "psaOvlp", "psaOvlp.rda"))
   } ## end 3.3
     
   ### 3.4 plot RDA output
@@ -615,7 +635,7 @@ for(pp in psa_selection) {
                 newdata = transEnv %>% as.data.frame(),
                 type = "wa",
                 scaling = 1
-              )[,1:2] %>% 
+              )[, 1:2, drop = FALSE] %>%
               as.data.frame() %>% 
               st_as_sf(coords = c("RDA1", "RDA2"))
           ) %>% 

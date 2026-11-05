@@ -72,9 +72,18 @@ Per-site outputs include:
   psaChange/LcovOut_new.rda and LcovOut_new.tif: maps displaying ice as 220.
   iceMasks/: aligned, cached ice-status rasters (0 = ice-free, 1 = ice).
 The project-level preprocessing_status.csv records each selected site's
-preprocessing status, stage, and error message. Preprocessing failures stop the
-workflow before pixel flow starts. The project-level ice_flow_status.csv records
-completed, cached, or failed pixel-flow sites.
+preprocessing status, stage, and error message. The standard run reads all sites
+in ala_sites.txt and records sites with missing metadata as skipped. Other
+preprocessing failures stop the workflow before pixel flow starts. A retry with
+the same preprocessing fingerprint can reuse saved intermediate results. Pixel
+flow requires a completion manifest. The project-level ice_flow_status.csv
+records completed, cached, or failed pixel-flow sites.
+
+Prediction omits non-finite pollen rows at ages up to 500 years, outside the
+pixel-flow target ages. PSA 16238 is capped at 26,000 years for pixel flow. Its
+full-age predictions are preserved separately in summaryResults. When an RDA
+density grid has zero mass for a class, the grid is extended to include the
+calibration scores and evaluated again with the same bandwidths.
 Ice reaching a pollen source is logged; it does not currently adjust its targets.
 Source-point cell indices, source-polygon boundary fractions, and area weights
 are prepared once per site. Each age reuses them with the ice-status vector

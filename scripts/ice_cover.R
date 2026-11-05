@@ -465,12 +465,22 @@ ice_preprocessing_signature <- function(data_dir = "input") {
 
 ice_preprocessing_cache <- function(dir_out, signature, complete = FALSE) {
   manifest_file <- file.path(dir_out, "summaryResults", "ice_preprocessing.rds")
+  pending_file <- file.path(dir_out, "summaryResults", "ice_preprocessing_pending.rds")
+  write_signature <- function(path) {
+    temporary <- tempfile("preprocessing-signature-", tmpdir = dirname(path))
+    on.exit(unlink(temporary))
+    saveRDS(signature, temporary)
+    if (!file.rename(temporary, path)) stop("Could not publish preprocessing fingerprint: ", path)
+  }
   if (complete) {
-    saveRDS(signature, manifest_file)
+    write_signature(manifest_file)
+    unlink(pending_file)
     return(invisible(TRUE))
   }
   previous <- if (file.exists(manifest_file)) readRDS(manifest_file) else NULL
   if (identical(previous, signature)) return(invisible(TRUE))
+  if (!file.exists(manifest_file) && file.exists(pending_file) &&
+      identical(readRDS(pending_file), signature)) return(invisible(TRUE))
 
   # Only known derived files are invalidated. Raw data and psaVeg are retained.
   stale_files <- c(
@@ -494,6 +504,33 @@ ice_preprocessing_cache <- function(dir_out, signature, complete = FALSE) {
     message("Rebuilding class-dependent preprocessing for ", basename(dir_out))
     if (any(!file.remove(existing))) stop("Could not invalidate preprocessing cache.")
   }
-  if (file.exists(manifest_file)) file.remove(manifest_file)
+  if (file.exists(manifest_file) && !file.remove(manifest_file)) {
+    stop("Could not remove outdated preprocessing completion manifest.")
+  }
+  write_signature(pending_file)
   invisible(FALSE)
+}
+
+ice_save_capped_prediction <- function(psaLCover, prediction) {
+  directory <- dirname(prediction)
+  backup <- file.path(directory, "psaLCover_full_ages.rda")
+  checksum <- unname(tools::md5sum(prediction))
+  if (is.na(checksum)) stop("Cannot read the full-age prediction file: ", prediction)
+  # A later refit can generate a different full-age file. Preserve both versions.
+  if (file.exists(backup) && !identical(unname(tools::md5sum(backup)), checksum)) {
+    backup <- file.path(directory, paste0("psaLCover_full_ages_", checksum, ".rda"))
+  }
+  if (!file.exists(backup)) {
+    temporary <- tempfile("prediction-full-ages-", tmpdir = directory)
+    on.exit(unlink(temporary), add = TRUE)
+    if (!file.copy(prediction, temporary) || !file.rename(temporary, backup)) {
+      stop("Could not preserve the full-age prediction file.")
+    }
+  }
+  if (!identical(unname(tools::md5sum(backup)), checksum)) stop("Full-age backup failed verification.")
+  capped <- tempfile("prediction-capped-ages-", tmpdir = directory)
+  on.exit(unlink(capped), add = TRUE)
+  save(psaLCover, file = capped)
+  if (!file.rename(capped, prediction)) stop("Could not publish the capped prediction file.")
+  backup
 }

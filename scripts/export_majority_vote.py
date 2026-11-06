@@ -3,7 +3,8 @@
 Requires NumPy and Rasterio. From the repository root:
   python scripts/export_majority_vote.py
 
-The highest vote count wins. Ties go to the lowest class code.
+The highest vote count wins. For each tie, a class is chosen uniformly
+at random from the classes sharing the highest vote count.
 Pixels outside the coverage mask or without votes are NoData (0).
 """
 
@@ -47,6 +48,7 @@ def read_band_mapping(path, band_count):
 
 def export_majority_vote(directory):
     destination = directory / "majority_vote.tif"
+    rng = np.random.default_rng()
     with rasterio.open(directory / "vote_counts_new.tif") as source:
         codes, bands = read_band_mapping(directory / "band_classes_new.csv", source.count)
         profile = source.profile
@@ -62,11 +64,19 @@ def export_majority_vote(directory):
                 for _, window in output.block_windows(1):
                     data = source.read(bands, window=window)
                     votes, coverage = data[:-1], data[-1]
-                    # argmax picks the first maximum. The bands are sorted by class code.
-                    winners = votes.argmax(axis=0)
-                    winning_votes = np.take_along_axis(votes, winners[None, :, :], axis=0)[0]
+                    winning_votes = votes.max(axis=0)
+                    valid = (coverage != 0) & (winning_votes != 0)
+                    top_classes = votes == winning_votes
+                    winners = top_classes.argmax(axis=0)
+                    top_counts = top_classes.sum(axis=0)
+                    tied = valid & (top_counts > 1)
+                    if tied.any():
+                        # Sample a rank among each pixel's tied classes.
+                        ranks = rng.integers(top_counts[tied])
+                        cumulative = top_classes[:, tied].cumsum(axis=0)
+                        winners[tied] = (cumulative > ranks).argmax(axis=0)
                     labels = codes[winners]
-                    labels[(coverage == 0) | (winning_votes == 0)] = 0
+                    labels[~valid] = 0
                     output.write(labels, 1, window=window)
             staging.replace(destination)
     return destination

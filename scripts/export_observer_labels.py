@@ -2,6 +2,7 @@
 
 From the repository root: python scripts/export_observer_labels.py
 Use --ages 3500 -1000 to export just two timeslices.
+Site votes are clipped to the fixed output grid.
 """
 
 import argparse
@@ -54,7 +55,7 @@ def target_grid(reference):
 
 
 def site_offset(dataset, grid):
-    crs, transform, width, height = grid
+    crs, transform, _, _ = grid
     # Check both corners in pixel coordinates to catch origin and scale drift.
     relative = ~transform * dataset.transform
     col, row = (round(value) for value in relative * (0, 0))
@@ -63,8 +64,6 @@ def site_offset(dataset, grid):
             raise ValueError(f"Site pixels do not align to the output grid: {dataset.name}")
     if dataset.crs != crs:
         raise ValueError(f"Site CRS differs from the output grid: {dataset.name}")
-    if min(col, row) < 0 or col + dataset.width > width or row + dataset.height > height:
-        raise ValueError(f"Site falls outside the output grid. Supply --grid-tif: {dataset.name}")
     return col, row
 
 
@@ -149,13 +148,16 @@ def export_timeslice(destination, inputs, grid):
         with ExitStack() as stack:
             tile_sites = defaultdict(list)
             for path, band, footprint in inputs:
+                # Clip the tile range, keeping the original source origin for reads.
+                left = max(0, footprint.col_off)
+                top = max(0, footprint.row_off)
+                right = min(width, footprint.col_off + footprint.width)
+                bottom = min(height, footprint.row_off + footprint.height)
+                if left >= right or top >= bottom:
+                    continue
                 dataset = stack.enter_context(rasterio.open(path))
-                first_col = footprint.col_off // TILE_SIZE
-                last_col = (footprint.col_off + footprint.width - 1) // TILE_SIZE
-                first_row = footprint.row_off // TILE_SIZE
-                last_row = (footprint.row_off + footprint.height - 1) // TILE_SIZE
-                for row in range(first_row, last_row + 1):
-                    for col in range(first_col, last_col + 1):
+                for row in range(top // TILE_SIZE, (bottom - 1) // TILE_SIZE + 1):
+                    for col in range(left // TILE_SIZE, (right - 1) // TILE_SIZE + 1):
                         tile_sites[row, col].append((dataset, band, footprint))
             output = stack.enter_context(rasterio.open(
                 staging / "vote_counts_new.tif", "w", driver="GTiff",

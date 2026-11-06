@@ -79,6 +79,13 @@ the same preprocessing fingerprint can reuse saved intermediate results. Pixel
 flow requires a completion manifest. The project-level ice_flow_status.csv
 records completed, cached, or failed pixel-flow sites.
 
+Pixel flow caps historical target ages at the oldest ice layer, 26,000 years
+for the supplied simulation. When a site has only a 500-year historical
+prediction, that target is used. Full land-cover predictions stay in the
+preprocessing files. To retry failed rows from ice_flow_status.csv, set NODES
+and RETRY_FAILED_FLOW <- TRUE in R before sourcing
+scripts/02_PixelFlow_parallel_noOptim_LS.R. The report retains other sites.
+
 Prediction omits non-finite pollen rows at ages up to 500 years, outside the
 pixel-flow target ages. PSA 16238 is capped at 26,000 years for pixel flow. Its
 full-age predictions are preserved separately in summaryResults. When an RDA

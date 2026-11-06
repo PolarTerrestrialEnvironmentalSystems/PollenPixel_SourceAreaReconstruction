@@ -1,7 +1,7 @@
 #################################
 ### PollenPixel: pixel flow    ###
 #################################
-rm(list = setdiff(ls(), "NODES"))
+rm(list = setdiff(ls(), c("NODES", "RETRY_FAILED_FLOW")))
 
 suppressPackageStartupMessages({
   library(dplyr)
@@ -38,6 +38,21 @@ rda_files <- tibble(Name = list.files(rda_dir)) %>%
     ID = as.numeric(vapply(strsplit(Name, "_"), function(parts) parts[2], ""))
   ) %>%
   filter(ID %in% ala_sites)
+
+flow_status_file <- file.path(project_dir, "ice_flow_status.csv")
+previous_flow_status <- NULL
+if (isTRUE(get0("RETRY_FAILED_FLOW", inherits = FALSE))) {
+  rm(RETRY_FAILED_FLOW)
+  previous_flow_status <- read.csv(flow_status_file, stringsAsFactors = FALSE)
+  if (!all(c("ID", "status", "message") %in% names(previous_flow_status)) ||
+      anyNA(previous_flow_status$ID) || anyDuplicated(previous_flow_status$ID)) {
+    stop("Expected one pixel-flow status row per site in ", flow_status_file)
+  }
+  failed_ids <- previous_flow_status$ID[which(previous_flow_status$status == "failed")]
+  rda_files <- filter(rda_files, ID %in% failed_ids)
+  if (!nrow(rda_files)) stop("No failed sites available to retry in ", flow_status_file)
+  message("Retrying pixel flow for ", nrow(rda_files), " sites from ", flow_status_file)
+}
 
 plot_landcover_flow <- function(LcovOut, class_defs, dir_out) {
   legend <- class_defs %>%
@@ -164,11 +179,24 @@ site_pixel_flow <- function(run) {
     lcovs <- psaOvlp@lcov
     class_ids <- as.numeric(sub("^LC_", "", lcovs))
 
-    psaFlow <- psaLCover@landcover_ts %>%
-      filter(Dataset_ID == ID, Age > 500) %>%
+    site_predictions <- filter(psaLCover@landcover_ts, Dataset_ID == ID)
+    oldest_ice_age <- ice_settings$age_origin - ice_settings$age_interval
+    psaFlow <- site_predictions %>%
+      filter(Age > 500, Age <= oldest_ice_age) %>%
       arrange(Age)
-    if (!nrow(psaFlow) || anyDuplicated(psaFlow$Age)) {
-      stop("Expected one vegetation target per reconstruction age.")
+    age_notes <- character()
+    older_count <- sum(site_predictions$Age > oldest_ice_age, na.rm = TRUE)
+    if (older_count > 0L) {
+      age_notes <- paste0("Capped pixel flow at ", oldest_ice_age,
+                          " years. Excluded ", older_count, " older target rows.")
+    }
+    if (!nrow(psaFlow)) {
+      psaFlow <- filter(site_predictions, Age == 500)
+      if (!nrow(psaFlow)) stop("No vegetation targets in the supported ice age range.")
+      age_notes <- c(age_notes, "Used the 500-year prediction as the only historical target.")
+    }
+    if (anyDuplicated(psaFlow$Age)) {
+      stop("Duplicate vegetation targets for a reconstruction age.")
     }
     target_columns <- names(psaFlow)[!names(psaFlow) %in% c("Dataset_ID", "Age")]
     if (!setequal(target_columns, as.character(class_ids))) {
@@ -448,7 +476,7 @@ site_pixel_flow <- function(run) {
       manifest_file
     )
     message("PSA ", ID, ": completed ice-aware pixel flow")
-    data.frame(ID = ID, status = "ok", message = "")
+    data.frame(ID = ID, status = "ok", message = paste(age_notes, collapse = " "))
   }, error = function(error) {
     message("PSA ", ID, ": ", conditionMessage(error))
     data.frame(ID = ID, status = "failed", message = conditionMessage(error))
@@ -487,11 +515,18 @@ parallel::clusterExport(
 parallel::clusterApplyLB(cl, seq_len(nrow(rda_files)), site_pixel_flow)
 }, finally = parallel::stopCluster(cl))
 results <- bind_rows(results)
-write.csv(
-  results,
-  file.path(project_dir, "ice_flow_status.csv"),
-  row.names = FALSE
-)
+if (!is.null(previous_flow_status)) {
+  results <- bind_rows(
+    previous_flow_status[!previous_flow_status$ID %in% results$ID, , drop = FALSE],
+    results
+  ) %>% arrange(ID)
+}
+status_tmp <- tempfile("ice-flow-status-", tmpdir = dirname(flow_status_file))
+write.csv(results, status_tmp, row.names = FALSE)
+if (!file.rename(status_tmp, flow_status_file)) {
+  unlink(status_tmp)
+  stop("Could not publish pixel-flow status: ", flow_status_file)
+}
 if (any(results$status == "failed")) {
   stop("Some sites failed; see landcoverchange/ice_flow_status.csv.")
 }
